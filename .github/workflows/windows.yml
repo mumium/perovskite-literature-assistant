@@ -1,0 +1,36 @@
+name: Windows build and tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and test single-file executable
+        shell: pwsh
+        run: ./build_windows.ps1 -Python python
+      - name: Verify portable executable and package source
+        shell: pwsh
+        run: |
+          ./.venv/Scripts/python.exe tools/verify_release.py
+          if ($LASTEXITCODE -ne 0) { throw 'Portable test failed' }
+          ./.venv/Scripts/python.exe tools/package_source.py
+          if ($LASTEXITCODE -ne 0) { throw 'Source package failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perovskite-windows-portable
+          path: |
+            dist/*.exe
+            dist/*源码*.zip
+            dist/SHA256.txt
+            dist/公开验收报告.json
+            dist/使用说明.md
