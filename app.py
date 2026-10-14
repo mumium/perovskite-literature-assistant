@@ -84,7 +84,8 @@ def main():
             aid = report["article_id"]
             window.article_id = aid; window.refresh()
             fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
-            reader_phase["automatic_original"]=window.reader.file_id==fid and window.tabs.currentWidget() is window.viewer_tab
+            reader_phase["automatic_original"]=window.reader.file_id==fid
+            reader_phase['tab_preserved']=window.tabs.currentWidget() is window.meta_tab
             window.tabs.setCurrentWidget(window.story_tab)
             window.grab().save(str(root / "GUI故事.png"))
             fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
@@ -95,6 +96,10 @@ def main():
                 QTimer.singleShot(300, finish); return
             if reader_phase["step"] == 0:
                 words = window.reader.canvas.data["words"]
+                chars=window.reader.canvas.data['characters']
+                index=next(i for i,c in enumerate(chars) if c['text']=='C')
+                window.reader.canvas.select_chars(index,index)
+                reader_phase['character_selection']=window.reader.selection_payload()['text']=='C'
                 start = next(i for i,w in enumerate(words) if w["text"] == "Control")
                 window.reader.canvas.select_words(start,start+8)
                 window.reader.note.setText("便携高亮验收：准备复现工艺")
@@ -107,6 +112,29 @@ def main():
                 window.reader.open_file(fid)
                 reader_phase["step"] = 2
                 QTimer.singleShot(500,finish); return
+            if reader_phase['step']==2:
+                import fitz
+                multiple=root/'明确标注的连续三页合成测试.pdf'
+                with fitz.open() as doc:
+                    for i in range(3): doc.new_page().insert_text((40,60),f'SYNTHETIC CONTINUOUS PAGE {i+1} - TEST ONLY')
+                    doc.save(multiple)
+                item=window.store.import_file(multiple)
+                window.reader.open_file(item['file_id'])
+                reader_phase['step']=3; QTimer.singleShot(400,finish); return
+            if reader_phase['step']==3:
+                window.reader.page.stepBy(-1)
+                reader_phase['step']=4; QTimer.singleShot(400,finish); return
+            if reader_phase['step']==4:
+                view=window.reader.pdf_view
+                reader_phase['continuous_pages']=len(view.pages)==3 and window.reader.page.value()==2 and view.document.height()>view.scroll.viewport().height()
+                count=view.render_count; width=window.reader.canvas.width()
+                window.reader.zoom.setValue(50)
+                reader_phase['instant_zoom']=view.render_count==count and window.reader.canvas.width()!=width
+                reader_phase['step']=5; QTimer.singleShot(400,finish); return
+            if reader_phase['step']==5:
+                fid=next(f['file_id'] for f in window.store.files(report['article_id']) if f['role']=='main')
+                window.reader.open_file(fid)
+                reader_phase['step']=6; QTimer.singleShot(400,finish); return
             window.grab().save(str(root / "GUI原文.png"))
             good = window.preview_image.pixmap() is not None and not window.preview_image.pixmap().isNull()
             import PySide6, fitz
@@ -137,10 +165,11 @@ def main():
             automatic_original=reader_phase.get("automatic_original",False)
             def unexpected_picker(*args): raise AssertionError("已记忆的目录不应再次弹出选择窗口")
             startup_memory=StartupMemory(memory.app_directory,memory.fallback_directory).choose_directory(unexpected_picker)==str(window.store.root)
-            compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=440 and window.table.rowHeight(0)==32
-            atomic_json(root / "gui-report.json", {"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
+            compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved']}
+            atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
-            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory else 1)
+            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(reader_checks.values()) else 1)
         QTimer.singleShot(500, screenshot)
     return application.exec()
 

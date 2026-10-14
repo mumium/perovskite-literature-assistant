@@ -31,8 +31,6 @@ def export_package(store, article_id, target, cancel=lambda: False):
     files = store.files(article_id)
     if not files:
         raise ValueError("文章没有附件，请先配对")
-    if any(not f["confirmed"] for f in files):
-        raise ValueError("请先在附件页确认每个文件的角色和关联")
     package_id = uid()
     manifest = {"schema_version": SCHEMA_VERSION, "package_id": package_id, "article_id": article_id,
                 "metadata": article["metadata"], "metadata_candidates": article["candidates"], "files": [], "created": now(),

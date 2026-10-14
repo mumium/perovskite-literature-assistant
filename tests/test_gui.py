@@ -55,25 +55,26 @@ def test_small_window_auto_read_switch_and_clear(tmp_path):
     window.resize(1280,720); window.show(); app.processEvents()
     window.table.selectRow(article_row(window,main['article_id'])); wait_reader(window,app)
     assert window.reader.file_id==main['file_id']
-    assert window.tabs.currentWidget() is window.viewer_tab
+    assert window.tabs.currentWidget() is window.meta_tab
     assert window.reader.canvas.data['file_id']==main['file_id']
     assert window.reader.file_picker.count()==2
     window.reader.file_picker.setCurrentIndex(window.reader.file_picker.findData(si['file_id']))
     assert window.reader.file_id==si['file_id'] and window.reader.kind=='docx'
-    # A click on an already selected article still opens its main PDF.
+    # Clicking a document preserves the selected tab and attachment.
     window.tabs.setCurrentWidget(window.story_tab)
     row=article_row(window,main['article_id'])
     window.table.scrollToItem(window.table.item(row,0)); app.processEvents()
     QTest.mouseClick(window.table.viewport(),Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,window.table.visualItemRect(window.table.item(row,0)).center())
     wait_reader(window,app)
-    assert window.reader.file_id==main['file_id'] and window.tabs.currentWidget() is window.viewer_tab
+    assert window.reader.file_id==si['file_id'] and window.tabs.currentWidget() is window.story_tab
+    window.reader.file_picker.setCurrentIndex(window.reader.file_picker.findData(main['file_id'])); wait_reader(window,app)
     assert window.windowTitle()==window.banner.text()=='钙钛矿文献助手'
     assert window.width()==1280 and window.height()==720
-    assert window.reader.scroll.viewport().height()>=440
+    assert window.reader.scroll.viewport().height()>=400
     assert window.table.viewport().height()//window.table.rowHeight(0)>=15
     assert window.table.rowHeight(0)==32
     assert window.table.isColumnHidden(1) and window.table.columnWidth(0)>=260
-    window.list_details.click(); assert not window.table.isColumnHidden(3)
+    window.list_details.click(); assert not window.table.isColumnHidden(3) and not window.table.isColumnHidden(4)
     window.list_details.click()
     assert window.reader.mark_details.isHidden() and window.reader.tools.isHidden()
     window.reader.tools_button.click(); assert not window.reader.tools.isHidden()

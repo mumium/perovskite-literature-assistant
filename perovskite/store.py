@@ -14,7 +14,7 @@ from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 from .extract import digest, extract, candidates
-from .schema import META_FIELDS, empty_metadata
+from .schema import META_FIELDS, empty_metadata, TAGS
 
 DB_VERSION = 2
 
@@ -194,8 +194,6 @@ class Store:
             if not files and not sections and not row["notes"]:
                 continue  # Retain merged article history in the DB without empty duplicate UI rows.
             state = []
-            if any(not f["confirmed"] for f in files):
-                state.append("待配对确认")
             if any(f["status"] != "ready" for f in files):
                 state.append("解析需关注")
             state += ["故事已导入" if any(s["name"] == "story" for s in sections) else "故事待分析", "工艺已导入" if any(s["name"] == "process" for s in sections) else "工艺待分析"]
@@ -248,7 +246,7 @@ class Store:
                         if len(stem) >= 12 and stem in source_names:
                             matches.append((article["article_id"], "文件名主干一致；弱依据，需确认首页标题与作者"))
                 new_id = self.new_article({"title": candidate["title"], "doi": candidate["doi"]}, [{"source": file_id, "location": "首页/前置段落", "values": candidate}])
-                self.db.execute("INSERT INTO links VALUES(?,?,?,?,?)", (file_id, new_id, candidate["role"], candidate["basis"], 0))
+                self.db.execute("INSERT INTO links VALUES(?,?,?,?,?)", (file_id, new_id, candidate["role"], candidate["basis"], 1))
                 for article_id, reason in matches:
                     self.db.execute("INSERT INTO proposals VALUES(?,?,?,?,0)", (uid(), file_id, article_id, reason))
                 self.reindex(new_id)
@@ -288,7 +286,7 @@ class Store:
                 imported=self.import_file(path,cancel)
                 fid=imported["file_id"]
                 prior=self.db.execute("SELECT * FROM links WHERE file_id=?",(fid,)).fetchone()
-                unchanged=bool(prior and prior["article_id"]==article_id and prior["role"]==role and prior["confirmed"])
+                unchanged=bool(prior and prior["article_id"]==article_id and prior["role"]==role)
                 # Re-selecting the same confirmed attachment must not invalidate
                 # already reviewed analysis. Changed membership still uses the
                 # normal association/history/verification rules.
@@ -345,6 +343,32 @@ class Store:
             self.history(article_id, "metadata", {"metadata": old["metadata"], "notes": old["notes"]}, {"metadata": metadata, "notes": notes}, "人工修订")
             self.db.execute("UPDATE articles SET metadata=?,notes=? WHERE article_id=?", (dumps(metadata), notes, article_id))
             self.reindex(article_id)
+
+    def tag_names(self):
+        config=json.loads((self.root/"config.json").read_text(encoding="utf-8"))
+        names=config.get("user_tags",TAGS)
+        names=list(names) if isinstance(names,list) else list(TAGS)
+        for row in self.rows("SELECT metadata FROM articles"):
+            names.extend(json.loads(row["metadata"]).get("tags",[]))
+        return list(dict.fromkeys(n.strip() for n in names if isinstance(n,str) and n.strip()))
+
+    def manage_tags(self,names,renames=None,removed=None):
+        if not isinstance(names,list) or any(not isinstance(n,str) or not n.strip() for n in names):
+            raise ValueError("标签名称不能为空")
+        names=list(dict.fromkeys(n.strip() for n in names))
+        renames=renames or {}; removed=set(removed or [])
+        with self.db:
+            for row in self.rows("SELECT article_id,metadata,notes FROM articles"):
+                metadata=json.loads(row["metadata"])
+                old=metadata.get("tags",[])
+                new=list(dict.fromkeys(renames.get(n,n) for n in old if n not in removed))
+                if new!=old:
+                    updated=copy.deepcopy(metadata); updated["tags"]=new
+                    self.history(row["article_id"],"metadata",metadata,updated,"自定义标签管理")
+                    self.db.execute("UPDATE articles SET metadata=? WHERE article_id=?",(dumps(updated),row["article_id"]))
+                    self.reindex(row["article_id"])
+        config=json.loads((self.root/"config.json").read_text(encoding="utf-8")); config["user_tags"]=names
+        atomic_json(self.root/"config.json",config)
 
     def add_candidates(self, article_id, values, source):
         old = self.article(article_id)

@@ -2,14 +2,16 @@ import html
 import json
 import os
 import threading
+import copy
+import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QLockFile
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QLockFile, QSize
 from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QAbstractItemView, QLineEdit, QComboBox,
     QPushButton, QLabel, QTabWidget, QTextBrowser, QPlainTextEdit, QFileDialog, QMessageBox, QDialog,
-    QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox, QScrollArea, QProgressBar, QGroupBox, QHeaderView, QSizePolicy)
+    QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox, QScrollArea, QProgressBar, QGroupBox, QHeaderView, QSizePolicy, QToolBar, QListWidget, QListWidgetItem, QInputDialog)
 
 from .exchange import preview, apply_result, strict_json, export_package, evidence_checks, semantic_validate
 from .exporting import excel_export, markdown
@@ -17,6 +19,8 @@ from .schema import META_FIELDS, STORY_FIELDS, TAGS, PROMPT, STORY, PROCESS
 from .store import Store, dumps, atomic_json, restore, uid
 from .network import crossref, analyze
 from .reader import ReaderPanel
+from .editing import InlineDelegate,EDIT_ROLE,bind,text_value,parse_value,save_content_edit
+from .ui_icons import icon,svg_pixmap
 
 ROLE_NAMES = {"main": "正文", "si": "SI", "version": "正文版本", "preprint": "预印本", "other": "其他"}
 STATE_NAMES = {"ready": "文字已提取", "partial": "部分页无文字", "no_text": "无文字层", "unsupported": "暂不支持", "error": "解析失败", "duplicate": "重复跳过"}
@@ -96,12 +100,12 @@ class Window(QMainWindow):
         widget = QWidget()
         self.setCentralWidget(widget)
         outer = QVBoxLayout(widget)
-        outer.setContentsMargins(6,4,6,4); outer.setSpacing(4)
+        outer.setContentsMargins(6,3,6,3); outer.setSpacing(3)
         self.banner = banner = QLabel("钙钛矿文献助手")
         banner.setStyleSheet("font-size:18px;font-weight:600;color:#214d62;padding:2px")
         brand = QHBoxLayout()
         logo = QLabel()
-        logo.setPixmap(QPixmap(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.png")).scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        logo.setPixmap(svg_pixmap((Path(__file__).resolve().parent.parent/'assets/logo-book-octahedron.svg').read_bytes(),32,max(2,self.devicePixelRatioF())))
         brand.addWidget(logo)
         brand.addWidget(banner)
         self.path_label = QLabel("数据目录：" + str(self.store.root) + "   ｜请勿同时编辑同一数据目录")
@@ -110,11 +114,12 @@ class Window(QMainWindow):
         self.path_label.setStyleSheet("color:#637382;font-size:11px")
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         brand.addWidget(self.path_label,1); outer.addLayout(brand)
-        bar = QHBoxLayout()
-        outer.addLayout(bar)
-        for label, callback in [("导入文件", self.import_files), ("导入文件夹", self.import_folder), ("关联附件", self.pair_file), ("导出分析包", self.export_analysis), ("导回结果", self.import_analysis), ("复制AI提示词", self.copy_prompt), ("API分析", self.api_analyze), ("比较 / Excel", self.export_excel)]:
-            self.button(label, callback, bar)
-        self.button("更多", self.more_menu, bar)
+        self.toolbar=QToolBar(); self.toolbar.setMovable(False); self.toolbar.setIconSize(QSize(22,22)); self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.toolbar.setStyleSheet('QToolButton{padding:4px;border:1px solid transparent;border-radius:4px} QToolButton:hover{background:#dceaf1;border-color:#adc5d2}')
+        outer.addWidget(self.toolbar)
+        for name,label,callback in [('import','导入文件',self.import_files),('folder','导入文件夹',self.import_folder),('attach','关联附件',self.pair_file),('export','导出分析包',self.export_analysis),('result','导回结果',self.import_analysis),('prompt','复制AI提示词',self.copy_prompt),('api','API分析',self.api_analyze),('excel','比较 / Excel',self.export_excel),('tags','自定义标签',self.manage_tags),('switch','切换数据目录',self.change_data_directory),('settings','联网配置',self.api_settings),('backup','完整备份',self.backup_data),('restore','恢复到空目录',self.restore_data),('history','修订历史 / 待采用分析候选',self.show_history),('help','使用说明',self.show_help)]:
+            action=self.toolbar.addAction(icon(name),label,callback); action.setToolTip(label); self.busy_controls.append(action)
+            self.toolbar.widgetForAction(action).setAccessibleName(label)
         split = QSplitter(Qt.Orientation.Horizontal)
         self.main_split = split
         self._reading_mode = False
@@ -124,24 +129,16 @@ class Window(QMainWindow):
         self.sidebar.setMaximumWidth(250)
         self.sidebar.setMinimumWidth(100)
         self.sidebar.setUniformRowHeights(True); self.sidebar.setIndentation(12)
-        all_item = QTreeWidgetItem(["全部文献"])
-        all_item.setData(0, Qt.ItemDataRole.UserRole, ("", ""))
-        self.sidebar.addTopLevelItem(all_item)
-        for title, field, values in [("处理状态", "state", ["待配对确认", "解析需关注", "故事待分析", "工艺待分析", "引用待核验", "人工待核验", "人工已核验"]), ("专题标签", "tags", TAGS)]:
-            parent = QTreeWidgetItem([title])
-            self.sidebar.addTopLevelItem(parent)
-            for value in values:
-                item = QTreeWidgetItem([value])
-                item.setData(0, Qt.ItemDataRole.UserRole, (field, value))
-                parent.addChild(item)
-            parent.setExpanded(True)
+        self.refresh_sidebar()
         self.sidebar.itemClicked.connect(self.sidebar_filter)
+        self.sidebar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sidebar.customContextMenuRequested.connect(lambda _:self.manage_tags())
         split.addWidget(self.sidebar)
         center = QWidget()
         self.center_panel = center
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(4); center.setMinimumWidth(240)
+        cl.setSpacing(3); center.setMinimumWidth(240)
         self.search = QLineEdit()
         self.search.setPlaceholderText("全文搜索：正文、SI、阅读卡、工艺、人工笔记")
         self.search.returnPressed.connect(self.refresh)
@@ -162,10 +159,10 @@ class Window(QMainWindow):
         countbar=QHBoxLayout(); countbar.addWidget(self.count_label,1)
         self.list_details=QPushButton("详情列"); self.list_details.setCheckable(True)
         self.list_details.setToolTip("展开或收起期刊、SI数量及处理状态列；悬停标题也可查看这些信息")
-        self.list_details.toggled.connect(lambda visible:[self.table.setColumnHidden(col,not visible) for col in [1,2,3]])
+        self.list_details.toggled.connect(lambda visible:[self.table.setColumnHidden(col,not visible) for col in [1,2,3,4]])
         countbar.addWidget(self.list_details); cl.addLayout(countbar)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["文献标题", "期刊 / 年份", "SI数", "处理状态"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["文献标题", "期刊 / 年份", "SI数", "处理状态","通讯作者"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -179,11 +176,11 @@ class Window(QMainWindow):
         self.table.setColumnWidth(1, 86)
         self.table.setColumnWidth(2, 36)
         self.table.setColumnWidth(3, 104)
+        self.table.setColumnWidth(4,140)
         self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setMinimumSectionSize(30)
-        for col in [1,2,3]: self.table.setColumnHidden(col,True)
+        for col in [1,2,3,4]: self.table.setColumnHidden(col,True)
         self.table.itemSelectionChanged.connect(self.select_article)
-        self.table.itemClicked.connect(lambda _:self.show_article_original())
         cl.addWidget(self.table, 1)
         help_label=QLabel("拖入导入 · Ctrl/Shift多选比较")
         help_label.setToolTip("配对建议仅供确认，同DOI不同版本均保留；悬停单元格可查看完整标题和状态")
@@ -196,8 +193,10 @@ class Window(QMainWindow):
         split.setSizes([128,380,1000])
         self.meta_tab = QWidget()
         ml = QVBoxLayout(self.meta_tab)
-        self.meta = QTextBrowser()
-        self.meta.setOpenExternalLinks(False)
+        self.meta = QTableWidget(0,2); self.meta.setHorizontalHeaderLabels(['文献信息','内容（双击编辑）'])
+        self.meta.verticalHeader().hide(); self.meta.setColumnWidth(0,175); self.meta.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch)
+        self.meta.setWordWrap(True); self.meta.setItemDelegate(InlineDelegate(self.meta)); self.meta.itemChanged.connect(self.inline_metadata_changed)
+        self.meta.itemDoubleClicked.connect(lambda item:self.meta.editItem(item) if item.data(EDIT_ROLE) else None)
         ml.addWidget(self.meta, 1)
         mb = QHBoxLayout()
         self.button("修订元数据", self.edit_metadata, mb)
@@ -212,9 +211,10 @@ class Window(QMainWindow):
         self.tabs.addTab(self.meta_tab, "文献信息")
         self.story_tab = QWidget()
         sl = QVBoxLayout(self.story_tab)
-        self.story = QTextBrowser()
-        self.story.setOpenLinks(False)
-        self.story.anchorClicked.connect(lambda url: self.jump_evidence(url.toString()))
+        self.story = QTreeWidget(); self.story.setHeaderLabels(['核心故事（双击直接编辑）','声明类别','证据'])
+        self.story.setColumnWidth(0,450); self.story.setColumnWidth(1,120); self.story.setWordWrap(True)
+        self.story.setItemDelegate(InlineDelegate(self.story)); self.story.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.story.itemChanged.connect(lambda item,col:self.inline_section_changed('story',item,col)); self.story.itemDoubleClicked.connect(self.story_double_clicked)
         sl.addWidget(self.story)
         sb = QHBoxLayout()
         self.button("人工修订 / 核验故事", lambda: self.edit_section("story"), sb)
@@ -226,7 +226,9 @@ class Window(QMainWindow):
         self.process = QTreeWidget()
         self.process.setHeaderLabels(["样品 / 工艺步骤 / 参数", "原文值与单位", "标准化值与单位", "基准 / 换算 / 冲突", "证据"])
         self.process.setColumnWidth(0, 240)
-        self.process.itemDoubleClicked.connect(self.tree_evidence)
+        self.process.setItemDelegate(InlineDelegate(self.process)); self.process.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.process.itemDoubleClicked.connect(lambda item,col:self.process_double_clicked(item,col,'samples'))
+        self.process.itemChanged.connect(lambda item,col:self.inline_section_changed('process',item,col))
         pl.addWidget(self.process)
         self.button("人工修订 / 核验工艺性能", lambda: self.edit_section("process"), pl)
         self.tabs.addTab(self.process_tab, "工艺")
@@ -236,7 +238,9 @@ class Window(QMainWindow):
         self.performance = QTreeWidget()
         self.performance.setHeaderLabels(["样品 / 测量类型 / 参数", "原文值", "标准化值", "测量条件 / 冲突", "证据"])
         self.performance.setColumnWidth(0, 230)
-        self.performance.itemDoubleClicked.connect(self.tree_evidence)
+        self.performance.setItemDelegate(InlineDelegate(self.performance)); self.performance.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.performance.itemDoubleClicked.connect(lambda item,col:self.process_double_clicked(item,col,'performance'))
+        self.performance.itemChanged.connect(lambda item,col:self.inline_section_changed('process',item,col))
         pfl.addWidget(self.performance)
         self.tabs.addTab(self.performance_tab, "性能与稳定性")
         self.evidence_tab = QWidget()
@@ -257,7 +261,7 @@ class Window(QMainWindow):
         self.attachments.itemDoubleClicked.connect(lambda *_: self.open_attachment())
         al.addWidget(self.attachments)
         ab = QHBoxLayout()
-        for label, callback in [("选择附件关联…", self.pair_file), ("查看", self.open_attachment), ("修改角色 / 确认", self.edit_file_role), ("解除关联", self.detach_file), ("重试解析", self.retry_file), ("待确认队列", self.pending_pairs)]:
+        for label, callback in [("选择附件关联…", self.pair_file), ("查看", self.open_attachment), ("修改角色", self.edit_file_role), ("解除关联", self.detach_file), ("重试解析", self.retry_file)]:
             self.button(label, callback, ab)
         al.addLayout(ab)
         self.tabs.addTab(self.attach_tab, "附件与配对")
@@ -270,7 +274,6 @@ class Window(QMainWindow):
         self.reader.focusRequested.connect(self.toggle_reader_mode)
         self.reader.changed.connect(lambda _: self.status.setText("原文高亮与批注已自动保存，可全文检索"))
         self.busy_controls.append(self.reader)
-        self.preview_image = self.reader.canvas
         self.doc_text = self.reader.doc_text
         self.page = self.reader.page
         self.scroll = self.reader.scroll
@@ -291,6 +294,126 @@ class Window(QMainWindow):
         bottom.addWidget(self.cancel_button)
         outer.addLayout(bottom)
         self.setStyleSheet("QMainWindow{background:#f5f7fa} QPushButton{padding:3px 6px;font-size:12px} QTabBar::tab{padding:5px 6px;font-size:12px} QTabWidget::pane{border:1px solid #ccd5dc} QTreeWidget,QTableWidget,QTextBrowser,QPlainTextEdit{background:white;alternate-background-color:#edf3f7} QHeaderView::section{background:#e4edf3;padding:3px;border:0px;font-size:12px} QLineEdit,QComboBox,QSpinBox{padding:2px;font-size:12px} QProgressBar{max-height:16px} QSplitter::handle{background:#d7e0e7}")
+
+    @property
+    def preview_image(self): return self.reader.canvas
+
+    def refresh_sidebar(self):
+        self.sidebar.clear()
+        all_item=QTreeWidgetItem(['全部文献']); all_item.setData(0,Qt.ItemDataRole.UserRole,('','')); self.sidebar.addTopLevelItem(all_item)
+        for title,field,values in [('处理状态','state',['解析需关注','故事待分析','工艺待分析','引用待核验','人工待核验','人工已核验']),('专题标签（右键管理）','tags',self.store.tag_names())]:
+            parent=QTreeWidgetItem([title]); self.sidebar.addTopLevelItem(parent)
+            for value in values:
+                item=QTreeWidgetItem([value]); item.setData(0,Qt.ItemDataRole.UserRole,(field,value)); item.setToolTip(0,value); parent.addChild(item)
+            parent.setExpanded(True)
+
+    def manage_tags(self):
+        if self.worker or self.reader.export_worker:
+            self.error('请等待当前任务完成后编辑标签'); return
+        aid=self.article_id; current=self.store.article(aid)['metadata']['tags'] if aid else []
+        original=self.store.tag_names()
+        dialog=QDialog(self); dialog.setWindowTitle('自定义专题标签'); dialog.resize(520,540)
+        layout=QVBoxLayout(dialog); layout.addWidget(QLabel('双击标签名称可修改；勾选表示应用到当前文献。删除或重命名会同步已有文献标签。'))
+        items=QListWidget(); items.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed); layout.addWidget(items)
+        def add(name='',old=None):
+            if not name:
+                name,ok=QInputDialog.getText(dialog,'新增标签','标签名称')
+                if not ok or not name.strip(): return
+            item=QListWidgetItem(name.strip()); item.setFlags(item.flags()|Qt.ItemFlag.ItemIsEditable|Qt.ItemFlag.ItemIsUserCheckable)
+            item.setData(Qt.ItemDataRole.UserRole,old); item.setCheckState(Qt.CheckState.Checked if name in current else Qt.CheckState.Unchecked); items.addItem(item)
+        for name in original: add(name,name)
+        row=QHBoxLayout()
+        self.button('新增',lambda:add(),row,False)
+        self.button('重命名',lambda:items.editItem(items.currentItem()) if items.currentItem() else None,row,False)
+        self.button('删除',lambda:items.takeItem(items.currentRow()) if items.currentRow()>=0 else None,row,False)
+        layout.addLayout(row)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+        if not dialog.exec(): return
+        names=[items.item(i).text().strip() for i in range(items.count())]
+        renames={items.item(i).data(Qt.ItemDataRole.UserRole):names[i] for i in range(items.count()) if items.item(i).data(Qt.ItemDataRole.UserRole) and items.item(i).data(Qt.ItemDataRole.UserRole)!=names[i]}
+        retained={items.item(i).data(Qt.ItemDataRole.UserRole) for i in range(items.count())}
+        try:
+            self.store.manage_tags(names,renames,set(original)-retained)
+            if aid:
+                article=self.store.article(aid); article['metadata']['tags']=list(dict.fromkeys(names[i] for i in range(items.count()) if items.item(i).checkState()==Qt.CheckState.Checked))
+                self.store.save_metadata(aid,article['metadata'],article['notes'])
+            if self.filter_field.currentData()=='tags':
+                value=self.filter_value.text()
+                if value in renames: self.filter_value.setText(renames[value])
+                elif value in set(original)-retained: self.filter_value.clear()
+            self.refresh_sidebar(); self.refresh()
+        except Exception as exc: self.error(exc)
+
+    def inline_metadata_changed(self,item):
+        binding=item.data(EDIT_ROLE)
+        if not binding: return
+        aid=binding['article_id']; article=self.store.article(aid); key=binding['path'][0]
+        try:
+            metadata=copy.deepcopy(article['metadata']); metadata[key]=parse_value(item.text(),metadata.get(key),binding.get('kind'))
+            self.store.save_metadata(aid,metadata,self.notes.toPlainText() if aid==self.article_id else article['notes'])
+            if key=='tags': self.refresh_sidebar()
+            QTimer.singleShot(0,self.refresh)
+            self.status.setText('文献信息已保存，修订历史保留')
+        except Exception as exc:
+            self.meta.blockSignals(True); item.setText(text_value(article['metadata'].get(key))); self.meta.blockSignals(False); self.error(exc)
+
+    def populate_story(self):
+        self.story.blockSignals(True); self.story.clear()
+        section=self.store.section(self.article_id,'story')
+        self.story.headerItem().setText(0,'核心故事（双击编辑 · '+('人工已核验' if section and section['human_verified'] else '人工待核验')+'）')
+        for field,label in STORY_FIELDS.items():
+            root=QTreeWidgetItem([label]); self.story.addTopLevelItem(root)
+            claims=section['content'][field] if section else []
+            for i,claim in enumerate(claims or [{'text':'双击填写','kind':'ai_inference','evidence_ids':[]}]):
+                item=QTreeWidgetItem([claim['text'],{'author_claim':'作者主张','direct_result':'直接结果','ai_inference':'推测/建议'}[claim['kind']],', '.join(claim['evidence_ids'])])
+                bind(item,0,self.article_id,[field,i,'text'],True,'string')
+                if claims:
+                    bind(item,1,self.article_id,[field,i,'kind'],False,'string')
+                    binding=item.data(1,EDIT_ROLE); binding['choices']=[('作者主张','author_claim'),('直接结果','direct_result'),('推测/建议','ai_inference')]; binding['value']=claim['kind']; item.setData(1,EDIT_ROLE,binding)
+                item.setData(2,Qt.ItemDataRole.UserRole,claim['evidence_ids']); item.setToolTip(0,claim['text'])
+                root.addChild(item)
+        self.story.expandAll(); self.story.blockSignals(False)
+
+    def story_double_clicked(self,item,column):
+        if column==2:
+            ids=item.data(2,Qt.ItemDataRole.UserRole)
+            if ids: self.jump_evidence(ids[0])
+        elif item.data(column,EDIT_ROLE): self.story.editItem(item,column)
+
+    def inline_section_changed(self,name,item,column):
+        binding=item.data(column,EDIT_ROLE)
+        if not binding: return
+        try:
+            save_content_edit(self.store,binding['article_id'],name,binding['path'],item.text(column),binding.get('kind'))
+            self.status.setText('内容已保存并保留历史；人工编辑后需重新核验结论')
+        except Exception as exc: self.error(exc)
+        QTimer.singleShot(0,self.populate_story if name=='story' else self.populate_process)
+
+    def process_double_clicked(self,item,column,kind):
+        action=item.data(0,int(Qt.ItemDataRole.UserRole)+41)
+        if action: self.add_process_record(*action)
+        elif column==4: self.tree_evidence(item,column)
+        elif item.data(column,EDIT_ROLE): (self.process if kind=='samples' else self.performance).editItem(item,column)
+
+    def add_process_record(self,kind,path=None):
+        if not self.article_id: return
+        section=self.store.section(self.article_id,'process')
+        content=copy.deepcopy(section['content']) if section else {'samples':[],'performance':[]}
+        node=content
+        for key in path or []: node=node[key]
+        if kind=='sample': content['samples'].append({'sample_id':uid(),'label':'新样品（双击修改）','group':'other','steps':[]})
+        elif kind=='step': node.append({'order':len(node),'category':'工艺步骤','description':'双击填写操作','parameters':[],'evidence_ids':[]})
+        elif kind=='parameter': node.append({'name':'新参数','original_value':None,'original_unit':None,'normalized_value':None,'normalized_unit':None,'basis':None,'conversion_note':None,'conflict_group':None,'evidence_ids':[]})
+        elif kind=='performance':
+            if not content['samples']: content['samples'].append({'sample_id':uid(),'label':'新样品','group':'other','steps':[]})
+            content['performance'].append({'record_id':uid(),'sample_id':content['samples'][0]['sample_id'],'measurement_kind':'新测量','conditions':{},'values':[],'evidence_ids':[]})
+        elif kind=='condition':
+            name,ok=QInputDialog.getText(self,'添加测试条件','条件名称（例如温度、湿度、光照）')
+            if not ok or not name.strip(): return
+            node[name.strip()]=None
+        evidence=section['evidence'] if section else []
+        with self.store.db: self.store.save_section(self.article_id,'process',content,evidence,evidence_checks(self.store,self.article_id,evidence),'人工添加工艺/性能',False)
+        self.populate_process()
 
     def error(self, text):
         QMessageBox.warning(self, "需要处理", str(text))
@@ -360,10 +483,10 @@ class Window(QMainWindow):
         selected_row = None
         for i, a in enumerate(rows):
             m = a["metadata"]
-            vals = [m.get("title_zh") or m.get("title") or "未命名文献", f"{m.get('journal') or '未报告'} / {m.get('year') or '未报告'}", str(sum(f["role"] == "si" for f in self.store.files(a["article_id"]))), a["state"]]
+            vals = [m.get("title_zh") or m.get("title") or "未命名文献", f"{m.get('journal') or '未报告'} / {m.get('year') or '未报告'}", str(sum(f["role"] == "si" for f in self.store.files(a["article_id"]))), a["state"],'; '.join(m.get('corresponding_authors') or []) or '未报告']
             for j, value in enumerate(vals):
                 item = QTableWidgetItem(value)
-                item.setToolTip("\n".join([vals[0],vals[1],"SI数量："+vals[2],vals[3]]) if j==0 else value)
+                item.setToolTip("\n".join([vals[0],vals[1],"SI数量："+vals[2],vals[3],'通讯作者：'+vals[4]]) if j==0 else value)
                 if j == 0:
                     item.setData(Qt.ItemDataRole.UserRole, a["article_id"])
                 self.table.setItem(i, j, item)
@@ -376,7 +499,7 @@ class Window(QMainWindow):
             self.table.selectRow(selected_row if selected_row is not None else 0)
         else:
             self.article_id = None
-            self.meta.setPlainText("请选择或导入文献。导入后在附件页确认正文及SI，再导出分析包。")
+            self.meta.blockSignals(True); self.meta.setRowCount(0); self.meta.blockSignals(False)
             self.story.clear()
             self.process.clear()
             self.performance.clear()
@@ -409,33 +532,23 @@ class Window(QMainWindow):
         self.article_id = self.table.item(current, 0).data(Qt.ItemDataRole.UserRole) if current >= 0 else ids[0]
         a = self.store.article(self.article_id)
         m = a["metadata"]
-        parts = [f"<h2>{esc(m.get('title_zh') or m.get('title'))}</h2>", f"<p>文章ID：{esc(self.article_id)}</p><table cellpadding='5'>"]
-        for k, label in META_FIELDS.items():
+        self.meta.blockSignals(True); self.meta.setRowCount(len(META_FIELDS))
+        for row,(k, label) in enumerate(META_FIELDS.items()):
             value = m.get(k)
-            if isinstance(value, list):
-                value = "; ".join(value) or "未报告"
-            parts.append(f"<tr><td><b>{esc(label)}</b></td><td>{esc(value)}</td></tr>")
-        parts.append("</table><p>本地提取和Crossref仅产生候选。来源与冲突见“候选与来源”。人工修订保留历史。</p>")
-        self.meta.setHtml("".join(parts))
+            labelitem=QTableWidgetItem(label); labelitem.setFlags(labelitem.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            cell=QTableWidgetItem(text_value(value)); cell.setToolTip(text_value(value))
+            cell.setData(EDIT_ROLE,{'article_id':self.article_id,'path':[k],'multiline':k in {'title','title_zh','affiliations'},'kind':'array' if isinstance(value,list) else 'boolean' if k=='si_complete' else None})
+            self.meta.setItem(row,0,labelitem); self.meta.setItem(row,1,cell)
+            self.meta.setRowHeight(row,32)
+        self.meta.blockSignals(False)
         self.notes.setPlainText(a["notes"])
-        self.story.clear()
+        self.populate_story()
         self.evidence.clear()
         for name in ["story", "process"]:
             section = self.store.section(self.article_id, name)
             if not section:
-                if name == "story":
-                    self.story.setPlainText("故事待分析。确认附件后导出分析包，在联网电脑分析，再导回JSON结果。")
                 continue
             verify_label = "人工已核验" if section["human_verified"] else "人工待核验"
-            if name == "story":
-                parts = [f"<p><b>{verify_label}</b> · 原文匹配仅证明引用存在。</p>"]
-                for key, title in STORY_FIELDS.items():
-                    parts.append(f"<h3>{title}</h3>")
-                    for claim in section["content"].get(key, []):
-                        label = {"author_claim": "作者主张", "direct_result": "直接结果", "ai_inference": "推测或建议"}[claim["kind"]]
-                        links = " ".join(f"<a href='{esc(e)}'>{esc(e)}</a>" for e in claim["evidence_ids"])
-                        parts.append(f"<p><b>[{label}]</b> {esc(claim['text'])}<br>{links}</p>")
-                self.story.setHtml("".join(parts))
             checks = {c["evidence_id"]: c for c in section["checks"]}
             for e in section["evidence"]:
                 item = QTreeWidgetItem([e["evidence_id"], f"{e['file_id'][:8]} / {e['loc_id']} / {e['figure'] or '未报告'}", e["quote"], ("原文匹配" if checks.get(e["evidence_id"], {}).get("matched") else "引用待核验") + " / " + verify_label])
@@ -444,7 +557,7 @@ class Window(QMainWindow):
         self.populate_process()
         self.attachments.clear()
         for f in self.store.files(self.article_id):
-            item = QTreeWidgetItem([f["name"], ROLE_NAMES[f["role"]], STATE_NAMES.get(f["status"], f["status"]), ("已确认：" if f["confirmed"] else "待确认：") + f["pairing"] + "；" + f["reason"]])
+            item = QTreeWidgetItem([f["name"], ROLE_NAMES[f["role"]], STATE_NAMES.get(f["status"], f["status"]), f["pairing"] + "；" + f["reason"]])
             item.setData(0, Qt.ItemDataRole.UserRole, f["file_id"])
             for col in range(4):
                 item.setToolTip(col, item.text(col))
@@ -458,12 +571,12 @@ class Window(QMainWindow):
             self.reader.file_picker.setCurrentIndex(self.reader.file_picker.findData(self.reader.file_id))
             self.reader.file_picker.blockSignals(False)
 
-    def show_article_original(self):
+    def show_article_original(self,reveal=False):
         if not self.article_id or self.worker: return
         files=self.store.files(self.article_id)
         priority={"main":0,"version":1,"preprint":2,"si":3,"other":4}
         candidates=sorted((f for f in files if Path(f['path']).suffix.lower() in {'.pdf','.docx'} and f['status'] in {'ready','partial','no_text'}),key=lambda f:priority.get(f['role'],5))
-        self.tabs.setCurrentWidget(self.viewer_tab)
+        if reveal: self.tabs.setCurrentWidget(self.viewer_tab)
         if not candidates:
             self.preview_file=self.preview_evidence=None
             reason="；".join(f["name"]+"："+f["reason"] for f in files)
@@ -471,35 +584,11 @@ class Window(QMainWindow):
             return
         fid=candidates[0]['file_id']
         if self.reader.file_id!=fid or self.reader.evidence is not None or (self.reader.kind=='pdf' and self.reader.canvas.data is None and not self.reader.active_worker):
-            self.open_file(fid)
+            self.open_file(fid,reveal=reveal)
 
     def populate_process(self):
-        self.process.clear()
-        self.performance.clear()
-        section = self.store.section(self.article_id, "process")
-        if not section:
-            self.process.addTopLevelItem(QTreeWidgetItem(["工艺待分析"])); return
-        def param_item(p):
-            item = QTreeWidgetItem([p["name"], f"{shown(p['original_value'])} {p['original_unit'] or ''}", f"{shown(p['normalized_value'])} {p['normalized_unit'] or ''}", f"基准：{p['basis'] or '未报告'}；{p['conversion_note'] or ''}；冲突：{p['conflict_group'] or '无'}", ", ".join(p["evidence_ids"])])
-            item.setData(0, Qt.ItemDataRole.UserRole, p["evidence_ids"])
-            return item
-        for sample in section["content"]["samples"]:
-            item = QTreeWidgetItem([f"{sample['label']} ({sample['sample_id']}) / {sample['group']}"])
-            self.process.addTopLevelItem(item)
-            for step in sorted(sample["steps"], key=lambda s: s["order"]):
-                child = QTreeWidgetItem([f"{step['order']}. {step['category']}", step["description"], "", "", ", ".join(step["evidence_ids"])])
-                child.setData(0, Qt.ItemDataRole.UserRole, step["evidence_ids"])
-                item.addChild(child)
-                for p in step["parameters"]:
-                    child.addChild(param_item(p))
-        for rec in section["content"]["performance"]:
-            item = QTreeWidgetItem([f"{rec['sample_id']} / {rec['measurement_kind']}", "", "", dumps(rec["conditions"]), ", ".join(rec["evidence_ids"])])
-            item.setData(0, Qt.ItemDataRole.UserRole, rec["evidence_ids"])
-            self.performance.addTopLevelItem(item)
-            for p in rec["values"]:
-                item.addChild(param_item(p))
-        self.process.expandAll()
-        self.performance.expandAll()
+        from .editing import populate_process
+        populate_process(self)
 
     def import_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "选择正文及SI", "", "文献附件 (*.pdf *.docx *.doc)")
@@ -546,7 +635,7 @@ class Window(QMainWindow):
                         report.append({"file": p.name, "status": "error", "reason": str(exc)})
                 atomic_json(root / "results" / f"import-report-{uid()}.json", report)
             return report
-        self.run_task("扫描并导入附件", work, lambda r: TextDialog("导入报告 · 在附件页确认配对", dumps(r), self).exec())
+        self.run_task("扫描并导入附件", work, lambda r: TextDialog("导入报告 · 可直接导出分析包", dumps(r), self).exec())
 
     def chosen_file(self):
         item = self.attachments.currentItem()
@@ -600,7 +689,7 @@ class Window(QMainWindow):
         if not fid:
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("修改附件角色 / 确认")
+        dialog.setWindowTitle("修改附件角色")
         dialog.resize(620, 220)
         form = QFormLayout(dialog)
         role = QComboBox()
@@ -617,7 +706,7 @@ class Window(QMainWindow):
         form.addRow(buttons)
         if dialog.exec():
             prior=self.store.db.execute("SELECT * FROM links WHERE file_id=?",(fid,)).fetchone()
-            if not prior["confirmed"] or prior["role"]!=role.currentData():
+            if prior["role"]!=role.currentData():
                 self.store.associate(fid, self.article_id, role.currentData())
             self.refresh(); self.tabs.setCurrentWidget(self.attach_tab)
 
@@ -625,10 +714,6 @@ class Window(QMainWindow):
         fid = self.chosen_file()
         if fid:
             self.article_id = self.store.detach(fid); self.refresh()
-
-    def pending_pairs(self):
-        lines = self.store.rows("SELECT p.*,f.name FROM proposals p JOIN files f USING(file_id) WHERE resolved=0")
-        TextDialog("待确认建议 · 先点目标文献，再点关联附件选择原文件", dumps(lines) if lines else "暂无候选建议。请先点目标文献，再点关联附件选择原文件；已有关联可在附件页确认角色。", self).exec()
 
     def retry_file(self):
         fid = self.chosen_file()
@@ -807,11 +892,11 @@ class Window(QMainWindow):
         if fid:
             self.open_file(fid)
 
-    def open_file(self, fid, evidence=None):
+    def open_file(self, fid, evidence=None, reveal=True):
         if self.worker:
             return
         self.preview_file, self.preview_evidence = fid, evidence
-        self.tabs.setCurrentWidget(self.viewer_tab)
+        if reveal: self.tabs.setCurrentWidget(self.viewer_tab)
         try:
             self.reader.open_file(fid,evidence)
         except Exception as exc:
@@ -848,7 +933,7 @@ class Window(QMainWindow):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
         if dialog.exec():
-            config = {"api_enabled": enabled.isChecked(), "base_url": base.text().strip(), "model": model.text().strip(), "timeout": timeout.value()}
+            config.update({"api_enabled": enabled.isChecked(), "base_url": base.text().strip(), "model": model.text().strip(), "timeout": timeout.value()})
             atomic_json(self.store.root / "config.json", config)
             self.api_key = key.text()
         return config
@@ -858,7 +943,7 @@ class Window(QMainWindow):
             return
         config = strict_json((self.store.root / "config.json").read_text(encoding="utf-8"))
         if not config.get("api_enabled"):
-            self.error("联网默认关闭，请在“更多 → 联网配置”主动开启")
+            self.error("联网默认关闭，请点顶部“联网配置”图标主动开启")
             return
         aid, root = self.article_id, self.store.root
         doi = self.store.article(aid)["metadata"].get("doi")
@@ -929,7 +1014,16 @@ class Window(QMainWindow):
             TextDialog("人工修订历史与分析候选 · 已核验段可复制候选到人工修订窗口采用", dumps({"history": history, "analysis_candidates": candidates}), self).exec()
 
     def show_help(self):
-        TextDialog("钙钛矿文献助手 · 第一版", "选择独立数据目录。导入默认复制原件，哈希去重。\n在附件页确认正文角色；选择SI，点击关联并指定正文文章，允许多个SI及不同版本。\n确认全部附件后导出分析包，阅读包内prompt与schema。将AI完成的JSON导回，检查差异与引用。\n人工修订/核验保留历史；已核验内容不会被AI重新分析覆盖，新结果保留候选。\n工艺和性能按样品/测量条件展示，空值为未报告。多选文章导出Excel作比较。\n默认离线。Key仅会话内存。扫描件不OCR，DOC不解析，图片/复杂表格需对照原件。\n数据目录可整体复制、搬移；请勿同时编辑同一目录。完整备份和恢复在“更多”。\n元数据和复杂结构第一版使用带校验的JSON编辑窗口。更详细说明见随附README。", self).exec()
+        text="""首次选择数据目录后自动记忆。顶部图标悬停显示功能名称，包含导入、关联附件、分析包交换、标签管理、换库、备份恢复等。
+导入文件后可直接导出分析包，无需确认角色或配对。需要SI时，先选正文文献，再点关联附件浏览电脑文件。
+自定义标签可新增、重命名、删除并勾选应用到当前文献；左侧标签上右键也可打开管理。
+文献信息、核心故事、工艺与性能字段可直接双击编辑。单行Enter保存，多行Ctrl+Enter保存，Esc取消，离开编辑框也保存；修订历史保留。编辑后的科学结论需重新核验。
+原文可连续滚动所有页面；页码下箭头向后、上箭头向前。缩放立即使用缓存，必要时后台提升清晰度。支持单字母选择，查找句子、高亮与删除高亮常驻。
+点击原文高亮或列表记录后按Delete删除；批注列双击直接编辑，位置/原文列双击跳转。删除键在文字输入框内正常删字。
+切换左侧文献保留当前页签。详情列包含通讯作者，完整名单可悬停查看。
+默认离线，不内置OCR；DOC暂不解析。PDF另存/写回批注在更多阅读操作中。所有数据在所选目录，附件可随目录搬移。
+更详细说明见随附README。"""
+        TextDialog("钙钛矿文献助手 · 使用说明",text,self).exec()
 
     def closeEvent(self, event):
         if self.worker:

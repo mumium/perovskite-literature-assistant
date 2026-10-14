@@ -68,8 +68,10 @@ def test_pdf_drag_highlight_zoom_reopen_and_delete(reader_library,qtapp):
     words=panel.canvas.data["words"]
     start=next(i for i,w in enumerate(words) if w["text"]=="Control")
     end=start+8
-    pos1=panel.canvas.screen_rect(words[start]["display_rect"]).center().toPoint()
-    pos2=panel.canvas.screen_rect(words[end]["display_rect"]).center().toPoint()
+    first=panel.canvas.screen_rect(words[start]['display_rect']); last=panel.canvas.screen_rect(words[end]['display_rect'])
+    from PySide6.QtCore import QPoint
+    pos1=QPoint(round(first.left()+1),round(first.center().y()))
+    pos2=QPoint(round(last.right()-1),round(last.center().y()))
     QTest.mousePress(panel.canvas,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,pos1)
     QTest.mouseMove(panel.canvas,pos2,20)
     QTest.mouseRelease(panel.canvas,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,pos2)
