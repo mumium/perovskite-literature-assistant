@@ -120,17 +120,23 @@ def main():
     if not release:
         release=api.request(f"/repos/{args.repository}/releases","POST",payload={"tag_name":args.tag,"target_commitish":commit,"name":"钙钛矿文献助手 "+args.tag,"body":(ROOT/"docs/RELEASE_v0.2.0.md").read_text(encoding="utf-8"),"draft":False,"prerelease":False})
     existing={a["name"]:a for a in api.request(f"/repos/{args.repository}/releases/{release['id']}/assets")}
-    artifacts=["钙钛矿文献助手.exe","钙钛矿文献助手-源码与说明.zip","使用说明.md","SHA256.txt","公开验收报告.json"]
-    for name in artifacts:
+    executable_name=f"perovskite-literature-assistant-{args.tag}-windows-x64.exe"
+    source_name=f"perovskite-literature-assistant-{args.tag}-source.zip"
+    artifacts={"钙钛矿文献助手.exe":executable_name,"钙钛矿文献助手-源码与说明.zip":source_name,"使用说明.md":"README-zh-CN.md","SHA256-GitHub.txt":"SHA256SUMS.txt","公开验收报告.json":"acceptance-summary.json"}
+    (ROOT/"dist/SHA256-GitHub.txt").write_text("\n".join(hashlib.sha256((ROOT/"dist"/local).read_bytes()).hexdigest()+"  "+remote for local,remote in artifacts.items() if local.endswith((".exe",".zip")))+"\n",encoding="utf-8")
+    uploaded=[]
+    for local_name,name in artifacts.items():
         if name in existing:
-            if existing[name]["size"]!=(ROOT/"dist"/name).stat().st_size: raise RuntimeError("Existing release asset differs; publish a new version instead: "+name)
+            if existing[name]["size"]!=(ROOT/"dist"/local_name).stat().st_size: raise RuntimeError("Existing release asset differs; publish a new version instead: "+name)
+            uploaded.append({"name":name,"url":existing[name]["browser_download_url"]})
             continue
         url=release["upload_url"].split("{")[0]+"?name="+urllib.parse.quote(name,safe="")
-        asset=api.request(url,"POST",data=(ROOT/"dist"/name).read_bytes(),content_type="application/octet-stream")
+        asset=api.request(url,"POST",data=(ROOT/"dist"/local_name).read_bytes(),content_type="application/octet-stream")
         print("Uploaded:",asset["name"],asset["size"],flush=True)
+        uploaded.append({"name":asset["name"],"url":asset["browser_download_url"]})
     published=api.request("/repos/"+args.repository)
     if published["private"]: raise RuntimeError("Repository is not public")
-    summary={"repository":published["html_url"],"public":True,"commit":commit,"release":release["html_url"],"tag":args.tag,"assets":artifacts}
+    summary={"repository":published["html_url"],"public":True,"commit":commit,"release":release["html_url"],"tag":args.tag,"assets":uploaded}
     (ROOT/"dist/GitHub发布记录.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2))
 
