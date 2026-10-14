@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="钙钛矿文献助手")
-    parser.add_argument("--data", help="数据目录；省略时每次启动选择，不写入注册表")
+    parser.add_argument("--data", help="数据目录；省略时自动打开上次目录，不写入注册表")
     parser.add_argument("--self-test", metavar="OUTPUT", help="运行明确标注的合成文档端到端自检")
     parser.add_argument("--smoke-test", metavar="OUTPUT", help="显示GUI、PDF预览并保存自检截图后退出")
     args = parser.parse_args()
@@ -33,15 +33,47 @@ def main():
         from perovskite.selftest import run_selftest
         report = run_selftest(args.smoke_test)
         args.data = report["data_dir"]
-    directory = args.data or QFileDialog.getExistingDirectory(None, "钙钛矿文献助手：选择或新建数据目录（不要与他人同时编辑）")
+    from perovskite.startup import StartupMemory
+    memory=StartupMemory(Path(args.smoke_test)/"启动位置记录",Path(args.smoke_test)/"启动位置备用记录") if args.smoke_test else StartupMemory()
+    directory = args.data if args.smoke_test else memory.choose_directory(QFileDialog.getExistingDirectory,args.data)
     if not directory:
         return 0
-    try:
-        from perovskite.gui import Window
-        window = Window(directory)
-    except Exception as exc:
-        QMessageBox.critical(None, "无法打开数据目录", str(exc))
-        return 1
+    from perovskite.gui import Window
+    while True:
+        try:
+            window = Window(directory)
+            break
+        except Exception as exc:
+            QMessageBox.critical(None, "无法打开数据目录", str(exc))
+            if args.data or args.smoke_test: return 1
+            directory=QFileDialog.getExistingDirectory(None,"请选择其他数据目录（原数据不会删除）",str(Path(directory).parent))
+            if not directory: return 0
+    def remember_directory(current):
+        try: memory.remember(current.store.root)
+        except (OSError,ValueError) as exc: current.status.setText(str(exc))
+
+    def connect_directory(current):
+        current.directoryRequested.connect(lambda path,w=current:switch_directory(w,path))
+
+    def switch_directory(previous,path):
+        nonlocal window
+        if previous.worker or previous.reader.export_worker:
+            previous.error("请等待当前任务完成后切换数据目录"); return
+        previous.reader.stop()
+        if previous.reader.active_worker:
+            QTimer.singleShot(100,lambda:switch_directory(previous,path)); return
+        try:
+            replacement=Window(path)
+        except Exception as exc:
+            previous.error(exc); return
+        connect_directory(replacement)
+        replacement.resize(previous.size())
+        replacement.show(); window=replacement
+        remember_directory(replacement)
+        previous.close()
+
+    connect_directory(window)
+    remember_directory(window)
     if args.smoke_test: window.resize(1280,720)
     window.show()
     if args.smoke_test:
@@ -103,10 +135,12 @@ def main():
             (root/"含高亮阅读卡.md").write_text(markdown(window.store,report["article_id"]),encoding="utf-8")
             window.store.backup(root/"含高亮完整备份.zip")
             automatic_original=reader_phase.get("automatic_original",False)
+            def unexpected_picker(*args): raise AssertionError("已记忆的目录不应再次弹出选择窗口")
+            startup_memory=StartupMemory(memory.app_directory,memory.fallback_directory).choose_directory(unexpected_picker)==str(window.store.root)
             compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=440 and window.table.rowHeight(0)==32
-            atomic_json(root / "gui-report.json", {"pdf_preview": good, "automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
+            atomic_json(root / "gui-report.json", {"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
-            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout else 1)
+            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory else 1)
         QTimer.singleShot(500, screenshot)
     return application.exec()
 

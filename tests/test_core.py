@@ -68,6 +68,40 @@ def test_pair_correction_and_move(library, tmp_path):
         assert moved.section(aid, "story")
         assert any(r["article_id"] == aid for r in moved.list_articles("5%"))
 
+def test_attach_selected_paths_import_reuse_partial_and_cancel(tmp_path):
+    source=fixtures(tmp_path/'浏览选择 中文 空格')
+    bad=tmp_path/'不是附件.txt'; bad.write_text('test',encoding='utf-8')
+    with Store(tmp_path/'文件选择 文献库') as store:
+        main=store.import_file(source['main']); aid=main['article_id']
+        existing=store.import_file(source['si_pdf'])
+        before=digest(source['si_docx'])
+        rows=store.attach_paths(aid,[source['si_pdf'],source['si_docx'],bad,source['old']])
+        assert [r['status'] for r in rows]==['associated','associated','error','associated']
+        assert rows[0]['reused'] and rows[0]['file_id']==existing['file_id']
+        assert rows[0]['previous_article_id']==existing['article_id']
+        assert rows[3]['parse_status']=='unsupported'
+        assert len(store.files(aid))==4
+        assert all(f['confirmed'] and f['role']=='si' for f in store.files(aid) if f['file_id']!=main['file_id'])
+        assert digest(source['si_docx'])==before
+        repeated=store.attach_paths(aid,[source['si_pdf'],source['si_docx']])
+        assert all(r['status']=='unchanged' for r in repeated)
+        assert len(store.files(aid))==4
+        cancelled=store.attach_paths(aid,[source['scanned']],cancel=lambda:True)
+        assert cancelled[0]['status']=='cancelled' and len(store.files(aid))==4
+        assert list((store.root/'results').glob('attach-report-*.json'))
+
+def test_reselect_confirmed_attachment_preserves_verified_analysis(library):
+    store,source,imported,aid,value=library
+    apply_result(store,value)
+    section=store.section(aid,'story')
+    with store.db:
+        store.save_section(aid,'story',section['content'],section['evidence'],section['checks'],'人工修订',True)
+    old=store.section(aid,'story')
+    result=store.attach_paths(aid,[source['si_pdf'],source['si_docx']])
+    assert all(r['status']=='unchanged' for r in result)
+    assert store.section(aid,'story')==old
+    assert all(c['matched'] for c in preview(store,value)['checks'])
+
 def test_roundtrip_protection_partial_and_history(library):
     store, source, imported, aid, value = library
     assert all(c["matched"] for c in preview(store, value)["checks"])

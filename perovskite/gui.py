@@ -57,6 +57,7 @@ class TextDialog(QDialog):
         layout.addWidget(buttons)
 
 class Window(QMainWindow):
+    directoryRequested=Signal(str)
     def __init__(self, data_dir):
         super().__init__()
         self.setWindowTitle("钙钛矿文献助手")
@@ -111,7 +112,7 @@ class Window(QMainWindow):
         brand.addWidget(self.path_label,1); outer.addLayout(brand)
         bar = QHBoxLayout()
         outer.addLayout(bar)
-        for label, callback in [("导入文件", self.import_files), ("导入文件夹", self.import_folder), ("导出分析包", self.export_analysis), ("导回结果", self.import_analysis), ("复制AI提示词", self.copy_prompt), ("API分析", self.api_analyze), ("比较 / Excel", self.export_excel)]:
+        for label, callback in [("导入文件", self.import_files), ("导入文件夹", self.import_folder), ("关联附件", self.pair_file), ("导出分析包", self.export_analysis), ("导回结果", self.import_analysis), ("复制AI提示词", self.copy_prompt), ("API分析", self.api_analyze), ("比较 / Excel", self.export_excel)]:
             self.button(label, callback, bar)
         self.button("更多", self.more_menu, bar)
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -256,7 +257,7 @@ class Window(QMainWindow):
         self.attachments.itemDoubleClicked.connect(lambda *_: self.open_attachment())
         al.addWidget(self.attachments)
         ab = QHBoxLayout()
-        for label, callback in [("查看", self.open_attachment), ("关联 / 角色 / 确认", self.pair_file), ("解除关联", self.detach_file), ("重试解析", self.retry_file), ("待确认队列", self.pending_pairs)]:
+        for label, callback in [("选择附件关联…", self.pair_file), ("查看", self.open_attachment), ("修改角色 / 确认", self.edit_file_role), ("解除关联", self.detach_file), ("重试解析", self.retry_file), ("待确认队列", self.pending_pairs)]:
             self.button(label, callback, ab)
         al.addLayout(ab)
         self.tabs.addTab(self.attach_tab, "附件与配对")
@@ -555,31 +556,70 @@ class Window(QMainWindow):
         return item.data(0, Qt.ItemDataRole.UserRole)
 
     def pair_file(self):
+        if not self.need_article(): return
+        if self.worker or self.reader.export_worker:
+            self.error("请等待当前任务或PDF保存结束后再关联附件"); return
+        aid=self.article_id
+        paths,_=QFileDialog.getOpenFileNames(self,"选择要关联到当前文献的附件（可多选）","","文献附件 (*.pdf *.docx *.doc)")
+        if not paths: return
+        article=self.store.article(aid)
+        title=article["metadata"].get("title_zh") or article["metadata"].get("title") or "未命名文献"
+        dialog=QDialog(self); dialog.setWindowTitle("关联到当前文献"); dialog.resize(620,240)
+        form=QFormLayout(dialog)
+        target=QLabel(title); target.setWordWrap(True); target.setToolTip(aid)
+        form.addRow("目标文献",target)
+        selected=QLabel(f"已选择 {len(paths)} 个文件："+"、".join(Path(p).name for p in paths[:2])+(" 等" if len(paths)>2 else ""))
+        selected.setWordWrap(True); selected.setToolTip("\n".join(paths)); form.addRow(selected)
+        role=QComboBox(); role.setObjectName("attachment_role")
+        for key,name in ROLE_NAMES.items(): role.addItem(name,key)
+        role.setCurrentIndex(role.findData("si")); form.addRow("所选附件角色",role)
+        explanation=QLabel("新文件会复制到数据目录；相同文件复用。已属于其他文献的附件会移入当前文献，原关联解除；分析内容保留，但需重新核验。")
+        explanation.setWordWrap(True); form.addRow(explanation)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("关联所选附件")
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
+        if not dialog.exec(): return
+        self.attach_paths_to_article(aid,paths,role.currentData())
+
+    def attach_paths_to_article(self,aid,paths,role="si"):
+        root=self.store.root
+        def work(cancel,progress):
+            with Store(root) as store: return store.attach_paths(aid,paths,role,cancel,progress)
+        def completed(report):
+            self.article_id=aid; self.refresh(); self.tabs.setCurrentWidget(self.attach_tab)
+            success=[r for r in report if r["status"] in {"associated","unchanged"}]
+            problems=[r for r in report if r["status"] in {"error","cancelled"} or r.get("parse_status") not in {"ready",None}]
+            self.status.setText(f"当前文献已关联 {len(success)} 个附件（复用 {sum(r['reused'] for r in success)} 个）"+(f"；{len(problems)} 项需关注" if problems else ""))
+            if problems:
+                lines=[f"{r['file']}\n{STATE_NAMES.get(r.get('parse_status'),r['status'])}：{r['reason']}" for r in problems]
+                TextDialog("附件关联报告 · 已完成项保留，可重试失败文件","\n\n".join(lines),self).exec()
+        self.run_task("从电脑选择附件并关联到当前文献",work,completed,False)
+
+    def edit_file_role(self):
         fid = self.chosen_file()
         if not fid:
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("人工确认正文与SI关联 / 修正角色")
-        dialog.resize(750, 240)
+        dialog.setWindowTitle("修改附件角色 / 确认")
+        dialog.resize(620, 220)
         form = QFormLayout(dialog)
-        articles = QComboBox()
-        for a in self.store.list_articles():
-            articles.addItem(f"{a['article_id'][:8]} · {a['metadata'].get('title') or '未命名'}", a["article_id"])
-        articles.setCurrentIndex(articles.findData(self.article_id))
         role = QComboBox()
         for key, name in ROLE_NAMES.items():
             role.addItem(name, key)
         current = self.store.db.execute("SELECT role FROM links WHERE file_id=?", (fid,)).fetchone()[0]
         role.setCurrentIndex(role.findData(current))
-        form.addRow("选择目标文章（稳定ID）", articles)
+        name=QLabel(self.store.file(fid)["name"]); name.setWordWrap(True)
+        form.addRow("当前附件",name)
         form.addRow("本文件角色", role)
         form.addRow(QLabel("同DOI版本均保留。更改关联会使原分析核验失效，但保留内容与历史。"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if dialog.exec():
-            self.store.associate(fid, articles.currentData(), role.currentData())
-            self.article_id = articles.currentData(); self.refresh()
+            prior=self.store.db.execute("SELECT * FROM links WHERE file_id=?",(fid,)).fetchone()
+            if not prior["confirmed"] or prior["role"]!=role.currentData():
+                self.store.associate(fid, self.article_id, role.currentData())
+            self.refresh(); self.tabs.setCurrentWidget(self.attach_tab)
 
     def detach_file(self):
         fid = self.chosen_file()
@@ -588,7 +628,7 @@ class Window(QMainWindow):
 
     def pending_pairs(self):
         lines = self.store.rows("SELECT p.*,f.name FROM proposals p JOIN files f USING(file_id) WHERE resolved=0")
-        TextDialog("待确认建议 · 请在附件页人工关联目标文章", dumps(lines) if lines else "暂无候选建议。所有新导入文件仍需在附件页确认角色。", self).exec()
+        TextDialog("待确认建议 · 先点目标文献，再点关联附件选择原文件", dumps(lines) if lines else "暂无候选建议。请先点目标文献，再点关联附件选择原文件；已有关联可在附件页确认角色。", self).exec()
 
     def retry_file(self):
         fid = self.chosen_file()
@@ -853,9 +893,16 @@ class Window(QMainWindow):
     def more_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        for label, callback in [("联网配置", self.api_settings), ("完整备份", self.backup_data), ("恢复到空目录", self.restore_data), ("修订历史 / 待采用分析候选", self.show_history), ("使用说明", self.show_help)]:
+        for label, callback in [("切换数据目录…", self.change_data_directory), ("联网配置", self.api_settings), ("完整备份", self.backup_data), ("恢复到空目录", self.restore_data), ("修订历史 / 待采用分析候选", self.show_history), ("使用说明", self.show_help)]:
             menu.addAction(label, callback)
         menu.exec(self.cursor().pos())
+
+    def change_data_directory(self):
+        if self.worker or self.reader.export_worker:
+            self.error("请等待当前任务完成后切换数据目录"); return
+        path=QFileDialog.getExistingDirectory(self,"切换数据目录（不会移动或删除当前数据）",str(self.store.root.parent))
+        if path and Path(path).resolve()!=self.store.root:
+            self.directoryRequested.emit(path)
 
     def backup_data(self):
         path, _ = QFileDialog.getSaveFileName(self, "备份到数据目录外（不含Key）", "钙钛矿文献备份.zip", "ZIP (*.zip)")

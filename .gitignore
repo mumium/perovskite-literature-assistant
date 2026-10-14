@@ -22,3 +22,5 @@ migrations/
 pdf_exports/
 pdf_backups/
 annotated/
+startup-location.json
+.startup-*.json

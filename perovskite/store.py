@@ -272,6 +272,40 @@ class Store:
                 self.reindex(row["article_id"])
         return value
 
+    def attach_paths(self, article_id, paths, role="si", cancel=lambda:False, progress=lambda *args:None):
+        """Import chosen disk files and associate to one explicit article, per file."""
+        self.article(article_id)
+        if role not in {"main", "si", "version", "preprint", "other"}:
+            raise ValueError("未知文件角色")
+        report=[]
+        for index,raw in enumerate(paths):
+            path=Path(raw)
+            try:
+                if cancel(): raise InterruptedError("已取消，尚未处理的附件未关联")
+                if path.suffix.lower() not in {".pdf",".docx",".doc"}:
+                    raise ValueError("仅支持PDF、DOCX和DOC附件")
+                progress(index,len(paths),f"导入并关联 {index+1}/{len(paths)}：{path.name}")
+                imported=self.import_file(path,cancel)
+                fid=imported["file_id"]
+                prior=self.db.execute("SELECT * FROM links WHERE file_id=?",(fid,)).fetchone()
+                unchanged=bool(prior and prior["article_id"]==article_id and prior["role"]==role and prior["confirmed"])
+                # Re-selecting the same confirmed attachment must not invalidate
+                # already reviewed analysis. Changed membership still uses the
+                # normal association/history/verification rules.
+                if not unchanged:
+                    self.associate(fid,article_id,role,"通过文件选择器关联到当前文献")
+                file=self.file(fid)
+                report.append({"file":path.name,"file_id":fid,"status":"unchanged" if unchanged else "associated",
+                    "reused":imported["status"]=="duplicate","role":role,"parse_status":file["status"],"reason":file["reason"],
+                    "previous_article_id":prior["article_id"] if prior else None,"article_id":article_id})
+            except InterruptedError as exc:
+                report.append({"file":path.name,"status":"cancelled","reason":str(exc)})
+                break
+            except Exception as exc:
+                report.append({"file":path.name,"status":"error","reason":str(exc)})
+        atomic_json(self.root/"results"/f"attach-report-{uid()}.json",report)
+        return report
+
     def associate(self, file_id, article_id, role, reason="人工关联"):
         if role not in {"main", "si", "version", "preprint", "other"}:
             raise ValueError("未知文件角色")

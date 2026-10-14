@@ -89,3 +89,50 @@ def test_small_window_auto_read_switch_and_clear(tmp_path):
     assert '没有附件' in window.reader.status.text()
     assert not errors
     window.close(); app.processEvents()
+
+def test_associate_uses_disk_file_picker_without_article_list(tmp_path,monkeypatch):
+    import time
+    from PySide6.QtWidgets import QFileDialog,QDialog,QComboBox
+    from perovskite.store import Store
+    from perovskite.selftest import fixtures
+    app=QApplication.instance() or QApplication([])
+    source=fixtures(tmp_path/'电脑上选择的 合成文档')
+    root=tmp_path/'附件选择 数据目录'
+    with Store(root) as store: main=store.import_file(source['main'])
+    window=Window(root); window.resize(1280,720); window.show(); wait_reader(window,app)
+    window.table.selectRow(article_row(window,main['article_id']))
+    assert window.attachments.currentItem() is None
+    pick_calls=[]
+    def pick(*args):
+        pick_calls.append(args)
+        return [str(source['si_pdf']),str(source['si_docx'])],'文献附件'
+    monkeypatch.setattr(QFileDialog,'getOpenFileNames',pick)
+    def role_dialog(dialog):
+        assert dialog.windowTitle()=='关联到当前文献'
+        choices=dialog.findChildren(QComboBox)
+        assert len(choices)==1 and choices[0].currentData()=='si'
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(QDialog,'exec',role_dialog)
+    window.pair_file()
+    deadline=time.monotonic()+10
+    while window.worker and time.monotonic()<deadline:
+        app.processEvents(); time.sleep(.01)
+    assert window.worker is None and pick_calls
+    wait_reader(window,app)
+    assert len(window.store.files(main['article_id']))==3
+    assert window.article_id==main['article_id']
+    assert window.tabs.currentWidget() is window.attach_tab
+    assert '已关联 2 个附件' in window.status.text()
+    monkeypatch.setattr(QFileDialog,'getOpenFileNames',lambda *args:([],''))
+    window.pair_file()
+    assert window.worker is None and len(window.store.files(main['article_id']))==3
+    monkeypatch.setattr(QFileDialog,'getOpenFileNames',lambda *args:([str(source['scanned'])],''))
+    monkeypatch.setattr(QDialog,'exec',lambda dialog:QDialog.DialogCode.Rejected)
+    window.pair_file()
+    assert window.worker is None and len(window.store.files(main['article_id']))==3
+    requested=[]; window.directoryRequested.connect(requested.append)
+    monkeypatch.setattr(QFileDialog,'getExistingDirectory',lambda *args:str(tmp_path/'另一个文献库'))
+    window.change_data_directory()
+    assert requested==[str(tmp_path/'另一个文献库')]
+    assert window.store.root==root.resolve()
+    window.close(); app.processEvents()

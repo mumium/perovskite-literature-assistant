@@ -73,7 +73,7 @@ def audit_index():
     forbidden={".venv","dist","build","test-output","tmp","files","api_jobs","exchanges","results","migrations","pdf_exports","pdf_backups","annotated"}
     for name in filter(None,names):
         path=Path(name)
-        if set(path.parts)&forbidden or path.suffix.lower() in {".sqlite",".db",".pdf",".docx",".doc"} or path.name in {"config.json",".env"}:
+        if set(path.parts)&forbidden or path.suffix.lower() in {".sqlite",".db",".pdf",".docx",".doc"} or path.name in {"config.json","startup-location.json",".env"} or path.name.startswith(".startup-"):
             raise RuntimeError("Refusing to publish data/runtime file: "+name)
         contents=git("show",":"+name,binary=True)
         if secret.search(contents): raise RuntimeError("Possible credential found in staged file: "+name)
@@ -84,7 +84,7 @@ def audit_index():
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--repository",required=True,help="owner/name")
-    parser.add_argument("--tag",default="v0.4.0")
+    parser.add_argument("--tag",default="v0.5.0")
     parser.add_argument("--publish-public",action="store_true")
     parser.add_argument("--commit-message",default="Update portable literature assistant")
     args=parser.parse_args()
