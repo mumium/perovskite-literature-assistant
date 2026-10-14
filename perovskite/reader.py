@@ -8,11 +8,16 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinBox, QPushButton,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox)
+    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy)
 
 from .extract import digest, PDF_LOCK
 
 COLORS = {"yellow": ("黄色", "#ffd84d"), "green": ("绿色", "#7ddc91"), "blue": ("蓝色", "#77caff"), "pink": ("粉色", "#ff9bc4")}
+
+class StatusLabel(QLabel):
+    def setText(self,text):
+        super().setText(text)
+        self.setToolTip(text)
 
 def utf16_length(text):
     return len(text.encode("utf-16-le")) // 2
@@ -47,7 +52,7 @@ def docx_selection(spans, start, end):
             texts.append(span["text"][a:b])
     return {"text": "\n".join(texts), "anchors": anchors}
 
-def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, query="", expected_hash=None, cancel=lambda:False):
+def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, query="", expected_hash=None, pixel_ratio=2, cancel=lambda:False):
     import fitz
     if expected_hash and digest(path, cancel) != expected_hash:
         raise ValueError("附件哈希已变化，请从原件重新导入；未把高亮关联到改变后的文件")
@@ -59,19 +64,26 @@ def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, que
         page = doc[page_index]
         width, height = page.rect.width, page.rect.height
         requested = max(.05, fit_width / width) if fit_width else zoom / 100 * 4/3
-        scale = min(requested, math.sqrt(16_000_000/(width*height)), 6000/max(width,height))
+        maximum = min(math.sqrt(16_000_000/(width*height)), 6000/max(width,height))
+        scale = min(requested, maximum)
+        # Keep zoom / selection coordinates in logical pixels. Render additional
+        # pixels for legible small text and high-DPI monitors, within a memory cap.
+        density = max(1, float(pixel_ratio))
+        render_scale = min(scale*density, maximum)
         if cancel():
             raise InterruptedError("已取消旧页面渲染")
         words = [{"rect": list(w[:4]), "display_rect": list(fitz.Rect(w[:4]) * page.rotation_matrix), "text": w[4], "block": w[5], "line": w[6]} for w in page.get_text("words", sort=True)]
         evidence_rects = [list(r * page.rotation_matrix) for r in page.search_for(evidence["quote"])] if evidence and evidence["loc_id"].startswith(f"pdf:p{page_index}:") else []
         hits = [{"rect": list(r), "display_rect": list(r * page.rotation_matrix)} for r in page.search_for(query)] if query else []
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale,scale), alpha=False)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(render_scale,render_scale), alpha=False)
         if cancel():
             raise InterruptedError("已取消旧页面渲染")
         return {"png": pixmap.tobytes("png"), "words": words, "page_index": page_index,
                 "page_count": doc.page_count, "width": width, "height": height,
+                "display_width": max(1, round(width*scale)), "display_height": max(1, round(height*scale)),
+                "render_density": render_scale/scale,
                 "rotation": list(page.rotation_matrix), "effective_zoom": round(scale*75),
-                "limited": scale < requested-.001, "evidence_rects": evidence_rects, "hits": hits, "query": query}
+                "limited": render_scale < requested*density-.001, "evidence_rects": evidence_rects, "hits": hits, "query": query}
 
 class PdfCanvas(QLabel):
     selectionChanged = Signal(str)
@@ -93,8 +105,9 @@ class PdfCanvas(QLabel):
         previous = self.selection if self.data and self.data.get("file_id") == file_id and self.data["page_index"] == data["page_index"] else None
         self.data = dict(data, file_id=file_id)
         pixmap = QPixmap.fromImage(QImage.fromData(data["png"]))
+        pixmap.setDevicePixelRatio(pixmap.width()/data["display_width"])
         self.setPixmap(pixmap)
-        self.setFixedSize(pixmap.size())
+        self.setFixedSize(data["display_width"],data["display_height"])
         self.marks = marks
         self.selection = previous
         self.manual_selection = None
@@ -127,10 +140,14 @@ class PdfCanvas(QLabel):
         return {"text":"".join(text), "anchors":[{"page_index":self.data["page_index"],"rect":w["rect"]} for w in words]}
 
     def paintEvent(self,event):
-        super().paintEvent(event)
         if not self.data:
+            super().paintEvent(event)
             return
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        pixmap=self.pixmap()
+        if pixmap and not pixmap.isNull():
+            painter.drawPixmap(QRectF(self.rect()),pixmap,QRectF(0,0,pixmap.width(),pixmap.height()))
         def draw(rect, color, border=False):
             fill = QColor(color); fill.setAlpha(85)
             painter.setBrush(fill)
@@ -259,6 +276,7 @@ class ReaderPanel(QWidget):
     error=Signal(str)
     changed=Signal(str)
     focusRequested=Signal()
+    fileRequested=Signal(str)
 
     def __init__(self,store,parent=None):
         super().__init__(parent)
@@ -270,52 +288,72 @@ class ReaderPanel(QWidget):
 
     def layout_ui(self):
         layout=QVBoxLayout(self)
+        layout.setContentsMargins(4,4,4,4); layout.setSpacing(4)
         top=QHBoxLayout(); self.label=QLabel("选择附件或证据")
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
         top.addWidget(self.label,1)
-        self.previous=QPushButton("上一页"); self.previous.clicked.connect(lambda:self.page.setValue(self.page.value()-1)); top.addWidget(self.previous)
-        self.page=QSpinBox(); self.page.setRange(1,1); self.page.setPrefix("实际页 "); self.page.valueChanged.connect(self.render_pdf); top.addWidget(self.page)
-        self.following=QPushButton("下一页"); self.following.clicked.connect(lambda:self.page.setValue(self.page.value()+1)); top.addWidget(self.following)
+        self.file_picker=QComboBox(); self.file_picker.setMinimumWidth(80)
+        self.file_picker.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.file_picker.currentIndexChanged.connect(lambda index:self.fileRequested.emit(self.file_picker.itemData(index)) if index>=0 else None)
+        top.addWidget(self.file_picker,1); self.file_picker.hide()
         self.focus_button=QPushButton("阅读模式"); self.focus_button.clicked.connect(self.focusRequested.emit); top.addWidget(self.focus_button)
+        self.tools_button=QPushButton("更多阅读操作 ▾"); self.tools_button.setCheckable(True); top.addWidget(self.tools_button)
         layout.addLayout(top)
         zoomrow=QHBoxLayout()
+        self.previous=QPushButton("上一页"); self.previous.clicked.connect(lambda:self.page.setValue(self.page.value()-1)); zoomrow.addWidget(self.previous)
+        self.page=QSpinBox(); self.page.setRange(1,1); self.page.setPrefix("页 "); self.page.setToolTip("PDF实际页面，非印刷页码"); self.page.valueChanged.connect(self.render_pdf); zoomrow.addWidget(self.page)
+        self.following=QPushButton("下一页"); self.following.clicked.connect(lambda:self.page.setValue(self.page.value()+1)); zoomrow.addWidget(self.following)
         for text,amount in [("－",-25),("＋",25)]:
-            button=QPushButton(text); button.setMaximumWidth(40); button.clicked.connect(lambda _,n=amount:self.adjust_zoom(n)); zoomrow.addWidget(button)
+            button=QPushButton(text); button.setFixedWidth(26); button.clicked.connect(lambda _,n=amount:self.adjust_zoom(n)); zoomrow.addWidget(button)
         self.zoom=QSpinBox(); self.zoom.setRange(25,400); self.zoom.setValue(100); self.zoom.setSuffix("%"); self.zoom.valueChanged.connect(self.manual_zoom); zoomrow.addWidget(self.zoom)
         fit=QPushButton("适合宽度"); fit.clicked.connect(self.fit_width); zoomrow.addWidget(fit)
         actual=QPushButton("100%"); actual.clicked.connect(lambda:self.zoom.setValue(100) if self.zoom.value()!=100 else self.manual_zoom(100)); zoomrow.addWidget(actual)
         self.hint=QLabel("PDF拖选文字或双击句子；Ctrl+滚轮缩放")
-        zoomrow.addWidget(self.hint,1); layout.addLayout(zoomrow)
+        self.hint.hide()
+        zoomrow.addStretch(); layout.addLayout(zoomrow)
+        self.tools=QWidget(); toolslayout=QVBoxLayout(self.tools); toolslayout.setContentsMargins(0,0,0,0); toolslayout.setSpacing(4)
         findrow=QHBoxLayout(); self.query=QLineEdit(); self.query.setPlaceholderText("粘贴当前页句子查找；重复文字会选中全部匹配区域")
         self.query.returnPressed.connect(self.find_sentence); findrow.addWidget(self.query)
-        find=QPushButton("查找句子"); find.clicked.connect(self.find_sentence); findrow.addWidget(find); layout.addLayout(findrow)
+        find=QPushButton("查找句子"); find.clicked.connect(self.find_sentence); findrow.addWidget(find); toolslayout.addLayout(findrow)
         exportrow=QHBoxLayout()
         self.export_copy=QPushButton("另存带批注 PDF…"); self.export_copy.clicked.connect(lambda:self.choose_pdf_export(False)); exportrow.addWidget(self.export_copy)
         self.write_original=QPushButton("写回原 PDF…"); self.write_original.clicked.connect(lambda:self.choose_pdf_export(True)); exportrow.addWidget(self.write_original)
         self.cancel_export=QPushButton("取消保存"); self.cancel_export.setEnabled(False); self.cancel_export.clicked.connect(self.cancel_pdf_export); exportrow.addWidget(self.cancel_export)
-        exportrow.addStretch(); layout.addLayout(exportrow)
-        split=QSplitter(Qt.Orientation.Vertical)
+        exportrow.addStretch(); toolslayout.addLayout(exportrow)
+        layout.addWidget(self.tools); self.tools.hide(); self.tools_button.toggled.connect(self.tools.setVisible)
         pages=QWidget(); pagelayout=QVBoxLayout(pages); pagelayout.setContentsMargins(0,0,0,0)
         self.canvas=PdfCanvas(); self.canvas.selectionChanged.connect(self.selection_changed); self.canvas.highlightRequested.connect(self.save_selection); self.canvas.zoomRequested.connect(self.adjust_zoom)
         self.scroll=QScrollArea(); self.scroll.setWidget(self.canvas); self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.scroll.setToolTip("拖选文字或双击句子；Ctrl+滚轮缩放；更多阅读操作中可查找句子或保存PDF批注")
         self.scroll.setStyleSheet("QScrollArea{background:#e1e7ed;border:1px solid #ccd5dc}")
         self.scroll.viewport().installEventFilter(self)
         pagelayout.addWidget(self.scroll)
         self.doc_text=QPlainTextEdit(); self.doc_text.setReadOnly(True); self.doc_text.selectionChanged.connect(lambda:self.selection_changed(self.doc_text.textCursor().selectedText()))
         pagelayout.addWidget(self.doc_text); self.doc_text.hide()
-        split.addWidget(pages)
+        layout.addWidget(pages,1)
         markpanel=QWidget(); self.mark_panel=markpanel; marklayout=QVBoxLayout(markpanel); marklayout.setContentsMargins(0,0,0,0)
+        marklayout.setSpacing(4)
         row=QHBoxLayout(); self.color=QComboBox()
         for key,(name,hexcolor) in COLORS.items(): self.color.addItem(name,key)
         row.addWidget(self.color)
-        for label,callback in [("保存高亮",self.save_selection),("复制选中",self.copy_selection),("修改批注",self.edit_mark),("删除高亮",self.delete_mark)]:
+        self.note=QLineEdit(); self.note.setMinimumWidth(60); self.note.setPlaceholderText("可选批注"); row.addWidget(self.note,1)
+        for label,callback in [("保存高亮",self.save_selection),("复制选中",self.copy_selection)]:
             button=QPushButton(label); button.clicked.connect(callback); row.addWidget(button)
+        self.marks_button=QPushButton("批注列表 ▾"); self.marks_button.setCheckable(True); row.addWidget(self.marks_button)
         marklayout.addLayout(row)
-        self.note=QLineEdit(); self.note.setPlaceholderText("可选批注，例如：准备复现实验；浓度基准待核验"); marklayout.addWidget(self.note)
+        self.mark_details=QWidget(); details=QVBoxLayout(self.mark_details); details.setContentsMargins(0,0,0,0); details.setSpacing(4)
+        actions=QHBoxLayout()
+        for label,callback in [("修改批注",self.edit_mark),("删除高亮",self.delete_mark)]:
+            button=QPushButton(label); button.clicked.connect(callback); actions.addWidget(button)
+        actions.addStretch(); details.addLayout(actions)
         self.marks=QTreeWidget(); self.marks.setHeaderLabels(["位置 / 颜色","高亮原文","批注"]); self.marks.setColumnWidth(0,130); self.marks.setColumnWidth(1,270)
-        self.marks.itemDoubleClicked.connect(self.jump_mark); marklayout.addWidget(self.marks)
-        split.addWidget(markpanel); split.setSizes([600,180]); layout.addWidget(split,1)
-        self.status=QLabel("高亮先存入数据库；需要在其他阅读器查看时，另存或写回PDF。")
-        self.status.setWordWrap(True); layout.addWidget(self.status)
+        self.marks.setMinimumHeight(65); self.marks.setMaximumHeight(120)
+        self.marks.itemDoubleClicked.connect(self.jump_mark); details.addWidget(self.marks)
+        marklayout.addWidget(self.mark_details); self.mark_details.hide(); self.marks_button.toggled.connect(self.mark_details.setVisible)
+        layout.addWidget(markpanel)
+        self.status=StatusLabel("高亮先存入数据库；需要在其他阅读器查看时，另存或写回PDF。")
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.status.setFixedHeight(20); self.status.setToolTip(self.status.text()); layout.addWidget(self.status)
         self.fit_timer=QTimer(self); self.fit_timer.setSingleShot(True); self.fit_timer.timeout.connect(self.render_pdf)
         self.shortcuts=[]
         for sequence,callback in [("Ctrl++",lambda:self.adjust_zoom(25)),("Ctrl+=",lambda:self.adjust_zoom(25)),("Ctrl+-",lambda:self.adjust_zoom(-25)),("Ctrl+0",self.fit_width)]:
@@ -326,8 +364,27 @@ class ReaderPanel(QWidget):
             if hasattr(self,"fit_timer"): self.fit_timer.start(150)
         return super().eventFilter(watched,event)
 
+    def set_files(self,files):
+        self.file_picker.blockSignals(True); self.file_picker.clear()
+        roles={"main":"正文","si":"SI","version":"正文版本","preprint":"预印本","other":"附件"}
+        for file in files:
+            self.file_picker.addItem(f"{roles.get(file['role'],'附件')} · {file['name']}",file["file_id"])
+            self.file_picker.setItemData(self.file_picker.count()-1,file["name"],Qt.ItemDataRole.ToolTipRole)
+        self.file_picker.blockSignals(False)
+        self.file_picker.setVisible(bool(files)); self.label.setVisible(not files)
+
+    def clear_file(self,message="当前文献没有可预览附件"):
+        self.stop(); self.file_id=None; self.kind=None; self.evidence=None
+        self.canvas.clear(); self.canvas.data=None; self.canvas.marks=[]
+        self.canvas.setFixedSize(1,1); self.scroll.show(); self.doc_text.hide()
+        self.canvas.selection=self.canvas.manual_selection=None
+        self.doc_text.clear(); self.marks.clear(); self.query.clear(); self.note.clear()
+        self.export_copy.setEnabled(False); self.write_original.setEnabled(False)
+        self.label.setText(message); self.status.setText(message)
+
     def open_file(self,file_id,evidence=None):
         self.file_id=file_id; self.evidence=evidence; self.query.clear(); self.note.clear()
+        self.file_picker.blockSignals(True); self.file_picker.setCurrentIndex(self.file_picker.findData(file_id)); self.file_picker.blockSignals(False)
         self.request_serial+=1; self.pending=None
         if self.active_worker: self.active_worker.cancelled.set()
         file=self.store.file(file_id); extraction=json.loads(file["extracted"])
@@ -392,7 +449,7 @@ class ReaderPanel(QWidget):
         request=self.pending; self.pending=None
         file=self.store.file(request["file_id"])
         kwargs={k:request[k] for k in ["page_index","zoom","fit_width","evidence","query"]}
-        kwargs.update(path=self.store.path(request["file_id"]),expected_hash=file["sha256"])
+        kwargs.update(path=self.store.path(request["file_id"]),expected_hash=file["sha256"],pixel_ratio=max(2,self.devicePixelRatioF()))
         worker=RenderThread(kwargs); self.active_worker=worker
         def display(data):
             if request["serial"]!=self.request_serial or request["file_id"]!=self.file_id: return

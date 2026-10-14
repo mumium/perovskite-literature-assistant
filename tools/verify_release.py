@@ -40,7 +40,7 @@ for name in ["selftest-report.json", "gui-report.json"]:
 if run.stderr:
     report["stderr"] = run.stderr.decode("utf-8", errors="replace")
 gui=report.get("gui-report.json",{})
-passed = run.returncode==0 and report.get("selftest-report.json",{}).get("passed") and all(gui.get(k) for k in ["pdf_preview","original_hash_unchanged","pdf_highlight_persisted","zoom_persisted","docx_highlight_persisted","native_pdf_annotations","write_back_backup"]) and report["only_exe_in_launch_folder"] and not report["temporary_MEI_remaining"]
+passed = run.returncode==0 and report.get("selftest-report.json",{}).get("passed") and all(gui.get(k) for k in ["pdf_preview","original_hash_unchanged","pdf_highlight_persisted","zoom_persisted","docx_highlight_persisted","native_pdf_annotations","write_back_backup","automatic_original","compact_layout"]) and report["only_exe_in_launch_folder"] and not report["temporary_MEI_remaining"]
 report["passed"] = bool(passed)
 (workspace / "dist" / "验收报告.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 # Developer consoles may use cp1252 even when paths contain Chinese characters.

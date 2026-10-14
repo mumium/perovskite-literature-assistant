@@ -161,3 +161,21 @@ def test_latest_render_wins_and_scan_page_status(reader_library,qtapp):
     panel.open_file(scanned["file_id"]); wait_reader(panel,qtapp)
     assert not panel.canvas.data["words"] and "无可选文字" in panel.status.text()
     panel.stop(); panel.close()
+
+def test_high_resolution_pixels_keep_zoom_and_highlight_geometry(reader_library,qtapp):
+    from PySide6.QtGui import QImage
+    from perovskite.reader import PdfCanvas
+    store,pdf,docx,files=reader_library
+    normal=load_pdf_page(store.path(pdf["file_id"]),0,fit_width=620,pixel_ratio=1)
+    sharp=load_pdf_page(store.path(pdf["file_id"]),0,fit_width=620,pixel_ratio=2)
+    assert QImage.fromData(sharp['png']).width() >= QImage.fromData(normal['png']).width()*1.99
+    assert sharp['display_width']==normal['display_width']==620
+    assert sharp['effective_zoom']==normal['effective_zoom']
+    assert sharp['words']==normal['words']
+    canvas=PdfCanvas(); canvas.set_page(normal,[],pdf['file_id'])
+    before=canvas.screen_rect(normal['words'][0]['display_rect'])
+    canvas.set_page(sharp,[],pdf['file_id'])
+    assert canvas.width()==620 and canvas.screen_rect(sharp['words'][0]['display_rect'])==before
+    assert canvas.pixmap().devicePixelRatio()>=1.99
+    assert canvas.word_at(before.center())==0
+    canvas.close()

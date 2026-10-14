@@ -9,7 +9,7 @@ from PySide6.QtGui import QPixmap, QImage, QIcon, QAction, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QAbstractItemView, QLineEdit, QComboBox,
     QPushButton, QLabel, QTabWidget, QTextBrowser, QPlainTextEdit, QFileDialog, QMessageBox, QDialog,
-    QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox, QScrollArea, QProgressBar, QGroupBox)
+    QDialogButtonBox, QFormLayout, QCheckBox, QSpinBox, QScrollArea, QProgressBar, QGroupBox, QHeaderView, QSizePolicy)
 
 from .exchange import preview, apply_result, strict_json, export_package, evidence_checks, semantic_validate
 from .exporting import excel_export, markdown
@@ -59,9 +59,10 @@ class TextDialog(QDialog):
 class Window(QMainWindow):
     def __init__(self, data_dir):
         super().__init__()
-        self.setWindowTitle("钙钛矿文献助手 · 离线文献库")
+        self.setWindowTitle("钙钛矿文献助手")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.ico")))
-        self.resize(1540, 940)
+        available=QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1680,available.width()-32),min(980,available.height()-48))
         root = Path(data_dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
         self.lock = QLockFile(str(root / ".library.lock"))
@@ -94,17 +95,20 @@ class Window(QMainWindow):
         widget = QWidget()
         self.setCentralWidget(widget)
         outer = QVBoxLayout(widget)
-        banner = QLabel("钙钛矿文献助手    ·    默认离线    ·    原件复制保存")
-        banner.setStyleSheet("font-size:22px;font-weight:600;color:#214d62;padding:10px")
+        outer.setContentsMargins(6,4,6,4); outer.setSpacing(4)
+        self.banner = banner = QLabel("钙钛矿文献助手")
+        banner.setStyleSheet("font-size:18px;font-weight:600;color:#214d62;padding:2px")
         brand = QHBoxLayout()
         logo = QLabel()
-        logo.setPixmap(QPixmap(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.png")).scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        logo.setPixmap(QPixmap(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.png")).scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         brand.addWidget(logo)
-        brand.addWidget(banner, 1)
-        outer.addLayout(brand)
+        brand.addWidget(banner)
         self.path_label = QLabel("数据目录：" + str(self.store.root) + "   ｜请勿同时编辑同一数据目录")
+        self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
+        self.path_label.setToolTip(self.path_label.text())
+        self.path_label.setStyleSheet("color:#637382;font-size:11px")
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        outer.addWidget(self.path_label)
+        brand.addWidget(self.path_label,1); outer.addLayout(brand)
         bar = QHBoxLayout()
         outer.addLayout(bar)
         for label, callback in [("导入文件", self.import_files), ("导入文件夹", self.import_folder), ("导出分析包", self.export_analysis), ("导回结果", self.import_analysis), ("复制AI提示词", self.copy_prompt), ("API分析", self.api_analyze), ("比较 / Excel", self.export_excel)]:
@@ -117,6 +121,8 @@ class Window(QMainWindow):
         self.sidebar = QTreeWidget()
         self.sidebar.setHeaderLabel("专题 / 标签 / 处理状态")
         self.sidebar.setMaximumWidth(250)
+        self.sidebar.setMinimumWidth(100)
+        self.sidebar.setUniformRowHeights(True); self.sidebar.setIndentation(12)
         all_item = QTreeWidgetItem(["全部文献"])
         all_item.setData(0, Qt.ItemDataRole.UserRole, ("", ""))
         self.sidebar.addTopLevelItem(all_item)
@@ -134,6 +140,7 @@ class Window(QMainWindow):
         self.center_panel = center
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4); center.setMinimumWidth(240)
         self.search = QLineEdit()
         self.search.setPlaceholderText("全文搜索：正文、SI、阅读卡、工艺、人工笔记")
         self.search.returnPressed.connect(self.refresh)
@@ -151,24 +158,41 @@ class Window(QMainWindow):
         self.button("清空", self.clear_filters, filterbar, False)
         cl.addLayout(filterbar)
         self.count_label = QLabel()
-        cl.addWidget(self.count_label)
+        countbar=QHBoxLayout(); countbar.addWidget(self.count_label,1)
+        self.list_details=QPushButton("详情列"); self.list_details.setCheckable(True)
+        self.list_details.setToolTip("展开或收起期刊、SI数量及处理状态列；悬停标题也可查看这些信息")
+        self.list_details.toggled.connect(lambda visible:[self.table.setColumnHidden(col,not visible) for col in [1,2,3]])
+        countbar.addWidget(self.list_details); cl.addLayout(countbar)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["文献标题", "期刊 / 年份", "SI数", "处理状态"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setWordWrap(True)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.setColumnWidth(0, 210)
-        self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 45)
-        self.table.setColumnWidth(3, 200)
+        self.table.setColumnWidth(1, 86)
+        self.table.setColumnWidth(2, 36)
+        self.table.setColumnWidth(3, 104)
+        self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setMinimumSectionSize(30)
+        for col in [1,2,3]: self.table.setColumnHidden(col,True)
         self.table.itemSelectionChanged.connect(self.select_article)
+        self.table.itemClicked.connect(lambda _:self.show_article_original())
         cl.addWidget(self.table, 1)
-        cl.addWidget(QLabel("可拖入文件或文件夹 · Ctrl/Shift选择多篇比较\n配对建议仅供确认，同DOI不同版本均保留"))
+        help_label=QLabel("拖入导入 · Ctrl/Shift多选比较")
+        help_label.setToolTip("配对建议仅供确认，同DOI不同版本均保留；悬停单元格可查看完整标题和状态")
+        cl.addWidget(help_label)
         split.addWidget(center)
         self.tabs = QTabWidget()
         split.addWidget(self.tabs)
-        split.setSizes([190, 590, 760])
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0,0); split.setStretchFactor(1,1); split.setStretchFactor(2,3)
+        split.setSizes([128,380,1000])
         self.meta_tab = QWidget()
         ml = QVBoxLayout(self.meta_tab)
         self.meta = QTextBrowser()
@@ -240,6 +264,7 @@ class Window(QMainWindow):
         vl = QVBoxLayout(self.viewer_tab)
         vl.setContentsMargins(0,0,0,0)
         self.reader = ReaderPanel(self.store, self)
+        self.reader.fileRequested.connect(self.open_file)
         self.reader.error.connect(self.error)
         self.reader.focusRequested.connect(self.toggle_reader_mode)
         self.reader.changed.connect(lambda _: self.status.setText("原文高亮与批注已自动保存，可全文检索"))
@@ -256,6 +281,7 @@ class Window(QMainWindow):
         self.progressbar.setRange(0, 1)
         self.progressbar.setValue(0)
         self.status = QLabel("就绪 · 离线模式，无启动网络请求")
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
         self.cancel_button = QPushButton("取消任务")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_task)
@@ -263,7 +289,7 @@ class Window(QMainWindow):
         bottom.addWidget(self.progressbar, 1)
         bottom.addWidget(self.cancel_button)
         outer.addLayout(bottom)
-        self.setStyleSheet("QMainWindow{background:#f5f7fa} QPushButton{padding:7px 10px} QTabWidget::pane{border:1px solid #ccd5dc} QTreeWidget,QTableWidget,QTextBrowser,QPlainTextEdit{background:white;alternate-background-color:#edf3f7} QHeaderView::section{background:#e4edf3;padding:5px;border:0px} QLineEdit,QComboBox{padding:6px} QProgressBar{max-height:20px}")
+        self.setStyleSheet("QMainWindow{background:#f5f7fa} QPushButton{padding:3px 6px;font-size:12px} QTabBar::tab{padding:5px 6px;font-size:12px} QTabWidget::pane{border:1px solid #ccd5dc} QTreeWidget,QTableWidget,QTextBrowser,QPlainTextEdit{background:white;alternate-background-color:#edf3f7} QHeaderView::section{background:#e4edf3;padding:3px;border:0px;font-size:12px} QLineEdit,QComboBox,QSpinBox{padding:2px;font-size:12px} QProgressBar{max-height:16px} QSplitter::handle{background:#d7e0e7}")
 
     def error(self, text):
         QMessageBox.warning(self, "需要处理", str(text))
@@ -336,11 +362,11 @@ class Window(QMainWindow):
             vals = [m.get("title_zh") or m.get("title") or "未命名文献", f"{m.get('journal') or '未报告'} / {m.get('year') or '未报告'}", str(sum(f["role"] == "si" for f in self.store.files(a["article_id"]))), a["state"]]
             for j, value in enumerate(vals):
                 item = QTableWidgetItem(value)
-                item.setToolTip(value)
+                item.setToolTip("\n".join([vals[0],vals[1],"SI数量："+vals[2],vals[3]]) if j==0 else value)
                 if j == 0:
                     item.setData(Qt.ItemDataRole.UserRole, a["article_id"])
                 self.table.setItem(i, j, item)
-            self.table.setRowHeight(i, 76)
+            self.table.setRowHeight(i, 32)
             if a["article_id"] == previous:
                 selected_row = i
         self.table.blockSignals(False)
@@ -356,6 +382,8 @@ class Window(QMainWindow):
             self.evidence.clear()
             self.attachments.clear()
             self.notes.clear()
+            self.reader.set_files([]); self.reader.clear_file("请选择或导入文献")
+            self.preview_file=self.preview_evidence=None
 
     def clear_filters(self):
         self.search.clear()
@@ -375,6 +403,7 @@ class Window(QMainWindow):
         ids = self.selected_ids()
         if not ids:
             return
+        previous=self.article_id
         current = self.table.currentRow()
         self.article_id = self.table.item(current, 0).data(Qt.ItemDataRole.UserRole) if current >= 0 else ids[0]
         a = self.store.article(self.article_id)
@@ -419,6 +448,29 @@ class Window(QMainWindow):
             for col in range(4):
                 item.setToolTip(col, item.text(col))
             self.attachments.addTopLevelItem(item)
+        files=self.store.files(self.article_id)
+        self.reader.set_files(files)
+        if previous!=self.article_id or self.reader.file_id not in {f['file_id'] for f in files}:
+            self.show_article_original()
+        elif self.reader.file_id:
+            self.reader.file_picker.blockSignals(True)
+            self.reader.file_picker.setCurrentIndex(self.reader.file_picker.findData(self.reader.file_id))
+            self.reader.file_picker.blockSignals(False)
+
+    def show_article_original(self):
+        if not self.article_id or self.worker: return
+        files=self.store.files(self.article_id)
+        priority={"main":0,"version":1,"preprint":2,"si":3,"other":4}
+        candidates=sorted((f for f in files if Path(f['path']).suffix.lower() in {'.pdf','.docx'} and f['status'] in {'ready','partial','no_text'}),key=lambda f:priority.get(f['role'],5))
+        self.tabs.setCurrentWidget(self.viewer_tab)
+        if not candidates:
+            self.preview_file=self.preview_evidence=None
+            reason="；".join(f["name"]+"："+f["reason"] for f in files)
+            self.reader.clear_file(reason or "当前文献没有附件，请在附件与配对中关联文件")
+            return
+        fid=candidates[0]['file_id']
+        if self.reader.file_id!=fid or self.reader.evidence is not None or (self.reader.kind=='pdf' and self.reader.canvas.data is None and not self.reader.active_worker):
+            self.open_file(fid)
 
     def populate_process(self):
         self.process.clear()

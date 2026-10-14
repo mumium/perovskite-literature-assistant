@@ -42,6 +42,7 @@ def main():
     except Exception as exc:
         QMessageBox.critical(None, "无法打开数据目录", str(exc))
         return 1
+    if args.smoke_test: window.resize(1280,720)
     window.show()
     if args.smoke_test:
         from perovskite.store import atomic_json
@@ -50,6 +51,8 @@ def main():
         def screenshot():
             aid = report["article_id"]
             window.article_id = aid; window.refresh()
+            fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
+            reader_phase["automatic_original"]=window.reader.file_id==fid and window.tabs.currentWidget() is window.viewer_tab
             window.tabs.setCurrentWidget(window.story_tab)
             window.grab().save(str(root / "GUI故事.png"))
             fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
@@ -99,9 +102,11 @@ def main():
             excel_export(window.store,[report["article_id"]],root/"含高亮导出.xlsx")
             (root/"含高亮阅读卡.md").write_text(markdown(window.store,report["article_id"]),encoding="utf-8")
             window.store.backup(root/"含高亮完整备份.zip")
-            atomic_json(root / "gui-report.json", {"pdf_preview": good, "original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
+            automatic_original=reader_phase.get("automatic_original",False)
+            compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=440 and window.table.rowHeight(0)==32
+            atomic_json(root / "gui-report.json", {"pdf_preview": good, "automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
-            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup else 1)
+            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout else 1)
         QTimer.singleShot(500, screenshot)
     return application.exec()
 
