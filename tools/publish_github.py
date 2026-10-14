@@ -19,7 +19,8 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def git(*args, binary=False):
     env=dict(os.environ,GIT_TERMINAL_PROMPT="0",GCM_INTERACTIVE="Never")
-    for key in ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"]: env.pop(key,None)
+    # Keep the user's configured proxy: GitHub's git endpoint may need it even
+    # when api.github.com can be reached directly.
     result=subprocess.run(["git",*args],cwd=ROOT,env=env,capture_output=True,timeout=180)
     if result.returncode:
         raise RuntimeError("git " + args[0] + " failed: " + result.stderr.decode("utf-8",errors="replace")[:1000])

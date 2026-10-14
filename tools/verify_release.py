@@ -43,5 +43,6 @@ gui=report.get("gui-report.json",{})
 passed = run.returncode==0 and report.get("selftest-report.json",{}).get("passed") and all(gui.get(k) for k in ["pdf_preview","original_hash_unchanged","pdf_highlight_persisted","zoom_persisted","docx_highlight_persisted"]) and report["only_exe_in_launch_folder"] and not report["temporary_MEI_remaining"]
 report["passed"] = bool(passed)
 (workspace / "dist" / "验收报告.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-print(json.dumps({"passed":passed,"exit_code":run.returncode,"output":str(output)}, ensure_ascii=False))
+# Developer consoles may use cp1252 even when paths contain Chinese characters.
+print(json.dumps({"passed":passed,"exit_code":run.returncode,"output":str(output)}, ensure_ascii=True))
 sys.exit(0 if passed else 1)
