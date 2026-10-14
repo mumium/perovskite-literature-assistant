@@ -50,12 +50,16 @@ class GitHub:
         if data is not None: headers["Content-Type"]=content_type or "application/json"
         attempts=3 if method=="GET" else 1
         for attempt in range(attempts):
+            request_url=url
+            if method=="GET" and attempt:
+                separator="&" if parsed.query else "?"
+                request_url=url+separator+"_retry="+str(time.time_ns())
             try:
-                with self.opener.open(urllib.request.Request(url,data=data,method=method,headers=headers),timeout=180) as response:
+                with self.opener.open(urllib.request.Request(request_url,data=data,method=method,headers=headers),timeout=180) as response:
                     return json.load(response)
             except urllib.error.HTTPError as exc:
                 if missing_ok and exc.code==404: return None
-                if exc.code in {502,503,504} and attempt+1<attempts:
+                if exc.code in {500,502,503,504} and attempt+1<attempts:
                     time.sleep(attempt+1); continue
                 raise RuntimeError(f"GitHub API returned HTTP {exc.code} for {method} {parsed.path}") from None
             except (urllib.error.URLError,ConnectionError,TimeoutError):
@@ -66,7 +70,7 @@ class GitHub:
 def audit_index():
     names=git("diff","--cached","--name-only","-z",binary=True).decode("utf-8").split("\0")
     secret=re.compile(rb"(?:gh[pousr]_[A-Za-z0-9]{24,}|github_pat_[A-Za-z0-9_]{24,}|sk-[A-Za-z0-9_-]{24,})")
-    forbidden={".venv","dist","build","test-output","tmp","files","api_jobs","exchanges","results","migrations"}
+    forbidden={".venv","dist","build","test-output","tmp","files","api_jobs","exchanges","results","migrations","pdf_exports","pdf_backups","annotated"}
     for name in filter(None,names):
         path=Path(name)
         if set(path.parts)&forbidden or path.suffix.lower() in {".sqlite",".db",".pdf",".docx",".doc"} or path.name in {"config.json",".env"}:
@@ -80,8 +84,9 @@ def audit_index():
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--repository",required=True,help="owner/name")
-    parser.add_argument("--tag",default="v0.2.0")
+    parser.add_argument("--tag",default="v0.3.0")
     parser.add_argument("--publish-public",action="store_true")
+    parser.add_argument("--commit-message",default="Update portable literature assistant")
     args=parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",args.repository): raise RuntimeError("Invalid repository name")
     api=GitHub(); user=api.request("/user")
@@ -108,7 +113,7 @@ def main():
     git("config","user.name",user["login"])
     git("config","user.email",f"{user['id']}+{user['login']}@users.noreply.github.com")
     if git("branch","--show-current")=="master": git("branch","-m","codex/portable-reader")
-    if file_count: git("commit","-m","Add portable literature assistant with persistent reader highlights")
+    if file_count: git("commit","-m",args.commit_message)
     commit=git("rev-parse","HEAD")
     branch=repo.get("default_branch") or "main"
     git("-c","http.version=HTTP/1.1","push","-u","origin",f"HEAD:{branch}")
@@ -118,7 +123,7 @@ def main():
     if remote["sha"]!=commit: raise RuntimeError("Remote commit does not match local HEAD")
     release=api.request(f"/repos/{args.repository}/releases/tags/{args.tag}",missing_ok=True)
     if not release:
-        release=api.request(f"/repos/{args.repository}/releases","POST",payload={"tag_name":args.tag,"target_commitish":commit,"name":"钙钛矿文献助手 "+args.tag,"body":(ROOT/"docs/RELEASE_v0.2.0.md").read_text(encoding="utf-8"),"draft":False,"prerelease":False})
+        release=api.request(f"/repos/{args.repository}/releases","POST",payload={"tag_name":args.tag,"target_commitish":commit,"name":"钙钛矿文献助手 "+args.tag,"body":(ROOT/f"docs/RELEASE_{args.tag}.md").read_text(encoding="utf-8"),"draft":False,"prerelease":False})
     existing={a["name"]:a for a in api.request(f"/repos/{args.repository}/releases/{release['id']}/assets")}
     executable_name=f"perovskite-literature-assistant-{args.tag}-windows-x64.exe"
     source_name=f"perovskite-literature-assistant-{args.tag}-source.zip"

@@ -19,3 +19,6 @@ exchanges/
 results/
 files/
 migrations/
+pdf_exports/
+pdf_backups/
+annotated/

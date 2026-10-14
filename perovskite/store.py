@@ -408,7 +408,7 @@ class Store:
                 self.db.backup(dest)
             with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
                 archive.write(temporary_db, "library.sqlite")
-                for folder in ["files", "exchanges", "results", "api_jobs", "migrations"]:
+                for folder in ["files", "exchanges", "results", "api_jobs", "migrations", "pdf_exports", "pdf_backups", "annotated"]:
                     for path in (self.root / folder).rglob("*"):
                         if cancel():
                             raise InterruptedError("备份已取消")

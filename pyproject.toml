@@ -1,6 +1,6 @@
 [project]
 name = "perovskite-literature-assistant"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 description = "离线便携钙钛矿文献助手"
 

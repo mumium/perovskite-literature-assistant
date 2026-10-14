@@ -275,6 +275,9 @@ class Window(QMainWindow):
         return True
 
     def run_task(self, label, function, callback=None, refresh=True):
+        if self.reader.export_worker:
+            self.error("PDF正在保存，请等待结束或取消保存")
+            return
         if self.worker:
             self.error("请等待当前任务完成或取消")
             return
@@ -834,7 +837,7 @@ class Window(QMainWindow):
             self.cancel_task()
             self.error("任务正在取消，请等待结束后关闭；已完成块会保留")
             event.ignore(); return
-        if self.reader.active_worker:
+        if self.reader.active_worker or self.reader.export_worker:
             self.reader.stop()
             self.status.setText("正在结束页面渲染…")
             QTimer.singleShot(100,self.close)

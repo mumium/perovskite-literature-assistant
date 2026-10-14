@@ -56,7 +56,7 @@ def main():
             window.open_file(fid)
             QTimer.singleShot(1800, finish)
         def finish():
-            if window.worker or window.reader.active_worker or window.reader.pending:
+            if window.worker or window.reader.active_worker or window.reader.export_worker or window.reader.pending:
                 QTimer.singleShot(300, finish); return
             if reader_phase["step"] == 0:
                 words = window.reader.canvas.data["words"]
@@ -80,6 +80,14 @@ def main():
             unchanged = digest(window.store.path(fid)) == window.store.file(fid)["sha256"]
             highlight_saved = len(window.store.highlights(fid))==1 and window.reader.marks.topLevelItemCount()==1
             zoom_saved = window.reader.zoom.value()==200 and window.store.reader_state(fid)["zoom"]==200
+            from perovskite.pdf_annotations import save_annotated_pdf
+            native_copy=save_annotated_pdf(window.store,fid,root/"含标准批注PDF.pdf")
+            native_back=save_annotated_pdf(window.store,fid,root/"明确标注的测试文档"/"测试 正文 synthetic.pdf",True)
+            with fitz.open(root/"含标准批注PDF.pdf") as annotated:
+                native_saved=any(a.info.get("content")=="便携高亮验收：准备复现工艺" for p in annotated for a in (p.annots() or []))
+                annotated[0].get_pixmap().save(root/"原生PDF批注渲染.png")
+            native_backup=bool(native_back["backup"]) and digest(native_back["backup"])==window.store.file(fid)["sha256"]
+            unchanged=digest(window.store.path(fid))==window.store.file(fid)["sha256"]
             docx = next(f for f in window.store.files(report["article_id"]) if f["path"].endswith(".docx"))
             window.reader.open_file(docx["file_id"])
             cursor=window.reader.doc_text.document().find("Control sample annealed at 100 C for 10 min.")
@@ -91,9 +99,9 @@ def main():
             excel_export(window.store,[report["article_id"]],root/"含高亮导出.xlsx")
             (root/"含高亮阅读卡.md").write_text(markdown(window.store,report["article_id"]),encoding="utf-8")
             window.store.backup(root/"含高亮完整备份.zip")
-            atomic_json(root / "gui-report.json", {"pdf_preview": good, "original_hash_unchanged": unchanged, "pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
+            atomic_json(root / "gui-report.json", {"pdf_preview": good, "original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
-            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved else 1)
+            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup else 1)
         QTimer.singleShot(500, screenshot)
     return application.exec()
 

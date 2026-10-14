@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinBox, QPushButton,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter)
+    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox)
 
 from .extract import digest, PDF_LOCK
 
@@ -239,6 +239,22 @@ class RenderThread(QThread):
             if not self.cancelled.is_set():
                 self.failed.emit(str(exc))
 
+class PdfExportThread(QThread):
+    ready=Signal(object)
+    failed=Signal(str)
+    def __init__(self,root,file_id,target,write_back):
+        super().__init__()
+        self.root,self.file_id,self.target,self.write_back=root,file_id,target,write_back
+        self.cancelled=threading.Event()
+    def run(self):
+        try:
+            from .store import Store
+            from .pdf_annotations import save_annotated_pdf
+            with Store(self.root) as store:
+                self.ready.emit(save_annotated_pdf(store,self.file_id,self.target,self.write_back,self.cancelled.is_set))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class ReaderPanel(QWidget):
     error=Signal(str)
     changed=Signal(str)
@@ -248,7 +264,7 @@ class ReaderPanel(QWidget):
         super().__init__(parent)
         self.store=store
         self.file_id=None; self.kind=None; self.evidence=None
-        self.active_worker=None; self.pending=None; self.request_serial=0
+        self.active_worker=None; self.export_worker=None; self.pending=None; self.request_serial=0
         self.zoom_mode="fit"; self.spans=[]; self.base_font=QApplication.font()
         self.layout_ui()
 
@@ -272,6 +288,11 @@ class ReaderPanel(QWidget):
         findrow=QHBoxLayout(); self.query=QLineEdit(); self.query.setPlaceholderText("粘贴当前页句子查找；重复文字会选中全部匹配区域")
         self.query.returnPressed.connect(self.find_sentence); findrow.addWidget(self.query)
         find=QPushButton("查找句子"); find.clicked.connect(self.find_sentence); findrow.addWidget(find); layout.addLayout(findrow)
+        exportrow=QHBoxLayout()
+        self.export_copy=QPushButton("另存带批注 PDF…"); self.export_copy.clicked.connect(lambda:self.choose_pdf_export(False)); exportrow.addWidget(self.export_copy)
+        self.write_original=QPushButton("写回原 PDF…"); self.write_original.clicked.connect(lambda:self.choose_pdf_export(True)); exportrow.addWidget(self.write_original)
+        self.cancel_export=QPushButton("取消保存"); self.cancel_export.setEnabled(False); self.cancel_export.clicked.connect(self.cancel_pdf_export); exportrow.addWidget(self.cancel_export)
+        exportrow.addStretch(); layout.addLayout(exportrow)
         split=QSplitter(Qt.Orientation.Vertical)
         pages=QWidget(); pagelayout=QVBoxLayout(pages); pagelayout.setContentsMargins(0,0,0,0)
         self.canvas=PdfCanvas(); self.canvas.selectionChanged.connect(self.selection_changed); self.canvas.highlightRequested.connect(self.save_selection); self.canvas.zoomRequested.connect(self.adjust_zoom)
@@ -282,7 +303,7 @@ class ReaderPanel(QWidget):
         self.doc_text=QPlainTextEdit(); self.doc_text.setReadOnly(True); self.doc_text.selectionChanged.connect(lambda:self.selection_changed(self.doc_text.textCursor().selectedText()))
         pagelayout.addWidget(self.doc_text); self.doc_text.hide()
         split.addWidget(pages)
-        markpanel=QWidget(); marklayout=QVBoxLayout(markpanel); marklayout.setContentsMargins(0,0,0,0)
+        markpanel=QWidget(); self.mark_panel=markpanel; marklayout=QVBoxLayout(markpanel); marklayout.setContentsMargins(0,0,0,0)
         row=QHBoxLayout(); self.color=QComboBox()
         for key,(name,hexcolor) in COLORS.items(): self.color.addItem(name,key)
         row.addWidget(self.color)
@@ -293,7 +314,7 @@ class ReaderPanel(QWidget):
         self.marks=QTreeWidget(); self.marks.setHeaderLabels(["位置 / 颜色","高亮原文","批注"]); self.marks.setColumnWidth(0,130); self.marks.setColumnWidth(1,270)
         self.marks.itemDoubleClicked.connect(self.jump_mark); marklayout.addWidget(self.marks)
         split.addWidget(markpanel); split.setSizes([600,180]); layout.addWidget(split,1)
-        self.status=QLabel("高亮与批注自动保存到数据目录，原件不修改。")
+        self.status=QLabel("高亮先存入数据库；需要在其他阅读器查看时，另存或写回PDF。")
         self.status.setWordWrap(True); layout.addWidget(self.status)
         self.fit_timer=QTimer(self); self.fit_timer.setSingleShot(True); self.fit_timer.timeout.connect(self.render_pdf)
         self.shortcuts=[]
@@ -315,6 +336,7 @@ class ReaderPanel(QWidget):
         state=self.store.reader_state(file_id); self.zoom_mode=state["zoom_mode"]
         self.zoom.blockSignals(True); self.zoom.setValue(state["zoom"]); self.zoom.blockSignals(False)
         pdf=self.kind=="pdf"
+        self.export_copy.setEnabled(pdf and not self.export_worker); self.write_original.setEnabled(pdf and not self.export_worker)
         for control in [self.page,self.previous,self.following]: control.setVisible(pdf)
         self.scroll.setVisible(pdf); self.doc_text.setVisible(not pdf)
         self.load_marks()
@@ -413,6 +435,8 @@ class ReaderPanel(QWidget):
         QApplication.clipboard().setText(self.selection_payload()["text"])
 
     def save_selection(self):
+        if self.export_worker:
+            self.status.setText("正在保存PDF，请等待结束后修改高亮"); return
         if self.kind not in {"pdf","docx"} or not self.file_id:
             self.error.emit("请先打开可读取的PDF或DOCX"); return
         if self.kind=="pdf" and self.active_worker:
@@ -493,6 +517,52 @@ class ReaderPanel(QWidget):
                 self.changed.emit(self.file_id)
             except Exception as exc: self.error.emit(str(exc))
 
+    def choose_pdf_export(self,write_back):
+        if self.kind!="pdf" or not self.file_id:
+            self.error.emit("仅PDF支持文件批注写入；DOCX仍保存在工具数据库"); return
+        if self.export_worker: return
+        if write_back:
+            dialog=QFileDialog(self,"选择最初导入的原PDF（写回前自动备份）")
+            dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+            dialog.setNameFilter("PDF (*.pdf)")
+            dialog.setLabelText(QFileDialog.DialogLabel.Accept,"写回并备份")
+            if not dialog.exec(): return
+            target=dialog.selectedFiles()[0]
+        else:
+            folder=self.store.root/"annotated"; folder.mkdir(exist_ok=True)
+            name=Path(self.store.file(self.file_id)["name"]).stem[:120]+"_批注.pdf"
+            target,_=QFileDialog.getSaveFileName(self,"另存标准PDF高亮与批注",str(folder/name),"PDF (*.pdf)")
+            if not target: return
+        self.start_pdf_export(target,write_back)
+
+    def start_pdf_export(self,target,write_back=False):
+        if self.export_worker: return
+        worker=PdfExportThread(self.store.root,self.file_id,target,write_back)
+        self.export_worker=worker
+        self.export_copy.setEnabled(False); self.write_original.setEnabled(False)
+        self.cancel_export.setEnabled(True); self.mark_panel.setEnabled(False)
+        self.status.setText("正在后台写入标准PDF批注；已有目标文件会先自动备份…")
+        worker.ready.connect(self.pdf_saved)
+        worker.failed.connect(lambda message:self.status.setText(message) if worker.cancelled.is_set() else self.error.emit(message))
+        def finished():
+            self.export_worker=None
+            self.export_copy.setEnabled(self.kind=="pdf"); self.write_original.setEnabled(self.kind=="pdf")
+            self.cancel_export.setEnabled(False); self.mark_panel.setEnabled(True)
+            worker.deleteLater()
+        worker.finished.connect(finished); worker.start()
+
+    def cancel_pdf_export(self):
+        if self.export_worker:
+            self.export_worker.cancelled.set(); self.status.setText("正在取消PDF保存；已替换目标前的步骤可取消")
+
+    def pdf_saved(self,report):
+        self.status.setText(f"PDF已保存：{report['target']}；{report['annotation_count']}条标准高亮批注")
+        text="已把高亮和批注写入PDF，可在支持批注的阅读器中查看。\n\n"+report["target"]
+        if report["backup"]: text+="\n\n写入前的备份：\n"+report["backup"]
+        if report["warnings"]: text+="\n\n"+"\n".join(report["warnings"])
+        QMessageBox.information(self,"PDF批注已保存",text)
+
     def stop(self):
         self.pending=None; self.request_serial+=1; self.fit_timer.stop()
         if self.active_worker: self.active_worker.cancelled.set()
+        if self.export_worker: self.export_worker.cancelled.set()
