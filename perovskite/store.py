@@ -16,7 +16,8 @@ from pathlib import Path, PurePosixPath
 from .extract import digest, extract, candidates
 from .schema import META_FIELDS, empty_metadata, TAGS
 
-DB_VERSION = 2
+DB_VERSION = 3
+UNFILED = '__unfiled__'
 
 def uid():
     return str(uuid.uuid4())
@@ -107,6 +108,23 @@ class Store:
                 self.db.rollback()
                 self.db.close()
                 raise
+            version=2
+        if version==2:
+            if existing_version==2:
+                folder=self.root/'migrations'; folder.mkdir(exist_ok=True)
+                with closing(sqlite3.connect(folder/f'library-v2-{uid()}.sqlite')) as snapshot:
+                    self.db.backup(snapshot)
+            try:
+                self.db.executescript('''
+                BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS categories(category_id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS article_categories(article_id TEXT NOT NULL REFERENCES articles(article_id) ON DELETE CASCADE,category_id TEXT NOT NULL REFERENCES categories(category_id) ON DELETE CASCADE,assigned TEXT NOT NULL,PRIMARY KEY(article_id,category_id));
+                CREATE INDEX IF NOT EXISTS article_categories_category ON article_categories(category_id,article_id);
+                PRAGMA user_version=3;
+                COMMIT;
+                ''')
+            except Exception:
+                self.db.rollback(); self.db.close(); raise
         if not (self.root / "config.json").exists():
             atomic_json(self.root / "config.json", {"api_enabled": False, "base_url": "https://api.openai.com/v1", "model": "", "timeout": 60})
 
@@ -174,17 +192,24 @@ class Store:
         self.db.execute("DELETE FROM search_index WHERE article_id=?", (article_id,))
         self.db.execute("INSERT INTO search_index VALUES(?,?)", (article_id, "\n".join(pieces)))
 
-    def list_articles(self, query="", filters=None):
+    def list_articles(self, query="", filters=None,category_id=None):
         filters = filters or {}
         if query.strip():
             phrase = '"' + query.replace('"', '""') + '"'
             ids = {r["article_id"] for r in self.rows("SELECT article_id FROM search_index WHERE search_index MATCH ? UNION SELECT article_id FROM search_index WHERE content LIKE ? ESCAPE '\\'", (phrase, "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"))}
         else:
             ids = None
+        members=None
+        if category_id==UNFILED:
+            members={r['article_id'] for r in self.rows('SELECT article_id FROM articles WHERE NOT EXISTS(SELECT 1 FROM article_categories ac WHERE ac.article_id=articles.article_id)')}
+        elif category_id:
+            self.category(category_id)
+            members={r['article_id'] for r in self.rows('SELECT article_id FROM article_categories WHERE category_id=?',(category_id,))}
         result = []
         for row in self.rows("SELECT * FROM articles ORDER BY created DESC"):
             if ids is not None and row["article_id"] not in ids:
                 continue
+            if members is not None and row['article_id'] not in members: continue
             row["metadata"] = json.loads(row["metadata"])
             meta = row["metadata"]
             if any(str(value).casefold() not in str(meta.get(field) or "").casefold() for field, value in filters.items() if value and field != "state"):
@@ -205,6 +230,65 @@ class Store:
                 continue
             result.append(row)
         return result
+
+    def category(self,category_id):
+        row=self.db.execute('SELECT * FROM categories WHERE category_id=?',(category_id,)).fetchone()
+        if not row: raise ValueError('类别不存在')
+        return dict(row)
+
+    def categories(self):
+        return self.rows('''SELECT c.*,COUNT(ac.article_id) AS article_count FROM categories c LEFT JOIN article_categories ac USING(category_id) GROUP BY c.category_id ORDER BY c.created,c.name''')
+
+    def article_categories(self,article_id):
+        self.article(article_id)
+        return self.rows('SELECT c.* FROM categories c JOIN article_categories ac USING(category_id) WHERE ac.article_id=? ORDER BY c.created,c.name',(article_id,))
+
+    def _category_name(self,name,exclude=None):
+        if not isinstance(name,str) or not name.strip() or len(name.strip())>200:
+            raise ValueError('类别名称不能为空，且不能超过200个字符')
+        name=name.strip()
+        if any(c['category_id']!=exclude and c['name'].casefold()==name.casefold() for c in self.categories()):
+            raise ValueError('已有同名类别，请换一个名称')
+        return name
+
+    def create_category(self,name):
+        name=self._category_name(name); category_id=uid()
+        with self.db: self.db.execute('INSERT INTO categories VALUES(?,?,?)',(category_id,name,now()))
+        return category_id
+
+    def rename_category(self,category_id,name):
+        old=self.category(category_id); name=self._category_name(name,category_id)
+        if name==old['name']: return
+        with self.db:
+            self.db.execute('UPDATE categories SET name=? WHERE category_id=?',(name,category_id))
+            for row in self.rows('SELECT article_id FROM article_categories WHERE category_id=?',(category_id,)):
+                self.history(row['article_id'],'categories',old,{'category_id':category_id,'name':name},'手动重命名类别')
+
+    def delete_category(self,category_id):
+        old=self.category(category_id)
+        with self.db:
+            for row in self.rows('SELECT article_id FROM article_categories WHERE category_id=?',(category_id,)):
+                self.history(row['article_id'],'categories',old,{'removed_category':category_id},'删除类别（文献与附件保留）')
+            self.db.execute('DELETE FROM categories WHERE category_id=?',(category_id,))
+
+    def assign_category(self,article_ids,category_id):
+        category=self.category(category_id); ids=list(dict.fromkeys(article_ids))
+        for article_id in ids: self.article(article_id)
+        count=0
+        with self.db:
+            for article_id in ids:
+                inserted=self.db.execute('INSERT OR IGNORE INTO article_categories VALUES(?,?,?)',(article_id,category_id,now())).rowcount
+                if inserted:
+                    self.history(article_id,'categories',None,category,'拖入手动分类'); count+=1
+        return count
+
+    def remove_category(self,article_ids,category_id):
+        category=self.category(category_id); ids=list(dict.fromkeys(article_ids))
+        for article_id in ids: self.article(article_id)
+        with self.db:
+            for article_id in ids:
+                if self.db.execute('DELETE FROM article_categories WHERE article_id=? AND category_id=?',(article_id,category_id)).rowcount:
+                    self.history(article_id,'categories',category,{'removed_from_category':category_id},'移出手动分类（文献与附件保留）')
 
     def import_file(self, source, cancel=lambda: False):
         source = Path(source)

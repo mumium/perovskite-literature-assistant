@@ -2,13 +2,14 @@
 import json
 import math
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinBox, QPushButton,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView)
+    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView, QProgressBar)
 from .editing import InlineDelegate,EDIT_ROLE
 
 from .extract import digest, PDF_LOCK
@@ -61,11 +62,11 @@ def docx_selection(spans, start, end):
             texts.append(span["text"][a:b])
     return {"text": "\n".join(texts), "anchors": anchors}
 
-def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, query="", expected_hash=None, pixel_ratio=2, text_data=None, cancel=lambda:False):
+def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, query="", expected_hash=None, pixel_ratio=2, text_data=None, cancel=lambda:False, document=None, raw_image=False):
     import fitz
     if expected_hash and digest(path, cancel) != expected_hash:
         raise ValueError("附件哈希已变化，请从原件重新导入；未把高亮关联到改变后的文件")
-    with PDF_LOCK, fitz.open(path) as doc:
+    with PDF_LOCK, (nullcontext(document) if document is not None else fitz.open(path)) as doc:
         if doc.needs_pass:
             raise ValueError("加密PDF无法预览")
         if not 0 <= page_index < doc.page_count:
@@ -77,7 +78,7 @@ def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, que
         scale = min(requested, maximum)
         # Keep zoom / selection coordinates in logical pixels. Render additional
         # pixels for legible small text and high-DPI monitors, within a memory cap.
-        density = max(1, float(pixel_ratio))
+        density = max(.01, float(pixel_ratio))
         render_scale = min(scale*density, maximum)
         if cancel():
             raise InterruptedError("已取消旧页面渲染")
@@ -98,7 +99,8 @@ def load_pdf_page(path, page_index, zoom=100, fit_width=None, evidence=None, que
         pixmap = page.get_pixmap(matrix=fitz.Matrix(render_scale,render_scale), alpha=False)
         if cancel():
             raise InterruptedError("已取消旧页面渲染")
-        return {"png": pixmap.tobytes("png"), "words": words, "characters":characters,"page_index": page_index,
+        image=QImage(pixmap.samples,pixmap.width,pixmap.height,pixmap.stride,QImage.Format.Format_RGB888).copy() if raw_image else None
+        return {"png": b'' if raw_image else pixmap.tobytes("png"), "image":image, "words": words, "characters":characters,"page_index": page_index,
                 "page_count": doc.page_count, "width": width, "height": height,
                 "display_width": max(1, round(width*scale)), "display_height": max(1, round(height*scale)),
                 "render_density": render_scale/scale,
@@ -116,6 +118,7 @@ class PdfCanvas(QLabel):
     def __init__(self):
         super().__init__()
         self.data = None
+        self._image=QImage()
         self.marks = []
         self.selection = None
         self.manual_selection = None
@@ -129,9 +132,7 @@ class PdfCanvas(QLabel):
     def set_page(self, data, marks, file_id):
         previous = self.selection if self.data and self.data.get("file_id") == file_id and self.data["page_index"] == data["page_index"] else None
         self.data = dict(data, file_id=file_id)
-        pixmap = QPixmap.fromImage(QImage.fromData(data["png"]))
-        pixmap.setDevicePixelRatio(pixmap.width()/data["display_width"])
-        self.setPixmap(pixmap)
+        self._image=data.get('image') or QImage.fromData(data['png'])
         self.setFixedSize(data["display_width"],data["display_height"])
         self.marks = marks
         self.selection = previous
@@ -148,10 +149,15 @@ class PdfCanvas(QLabel):
             self.setFixedSize(max(1,round(geometry['width']*scale)),max(1,round(geometry['height']*scale)))
 
     def release_bitmap(self,drop_data=False):
-        self.setPixmap(QPixmap())
+        self._image=QImage()
         if self.data: self.data['png']=b''
         if drop_data: self.data=None
-        self.setText(f"实际页 {getattr(self,'page_index',0)+1} · 滚动到此页自动加载")
+        self.setText(f"实际页 {getattr(self,'page_index',0)+1} · 等待全文预加载")
+
+    def pixmap(self):
+        pixmap=QPixmap.fromImage(self._image)
+        if self.data and not pixmap.isNull(): pixmap.setDevicePixelRatio(pixmap.width()/self.data['display_width'])
+        return pixmap
 
     def clear_selection(self):
         self.selection=self.manual_selection=None; self.update()
@@ -193,9 +199,8 @@ class PdfCanvas(QLabel):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        pixmap=self.pixmap()
-        if pixmap and not pixmap.isNull():
-            painter.drawPixmap(QRectF(self.rect()),pixmap,QRectF(0,0,pixmap.width(),pixmap.height()))
+        if not self._image.isNull():
+            painter.drawImage(QRectF(self.rect()),self._image,QRectF(self._image.rect()))
         def draw(rect, color, border=False):
             fill = QColor(color); fill.setAlpha(85)
             painter.setBrush(fill)
@@ -404,6 +409,10 @@ class ReaderPanel(QWidget):
         self.pdf_view.selectionChanged.connect(self.selection_changed); self.pdf_view.highlightRequested.connect(self.save_selection); self.pdf_view.zoomRequested.connect(self.adjust_zoom)
         self.pdf_view.currentChanged.connect(self.current_page_changed); self.pdf_view.markSelected.connect(self.select_mark); self.pdf_view.deleteRequested.connect(self.delete_mark)
         self.pdf_view.status.connect(self.status_text); self.pdf_view.error.connect(self.error.emit)
+        self.preload_panel=QWidget(); preload=QHBoxLayout(self.preload_panel); preload.setContentsMargins(0,0,0,0)
+        self.preload_progress=QProgressBar(); self.preload_progress.setMaximumHeight(16); preload.addWidget(self.preload_progress,1)
+        self.preload_button=QPushButton('暂停预载'); self.preload_button.clicked.connect(self.toggle_preload); preload.addWidget(self.preload_button)
+        self.pdf_view.loadingChanged.connect(self.preload_changed); layout.addWidget(self.preload_panel); self.preload_panel.hide()
         self.scroll=self.pdf_view.scroll
         self.scroll.setToolTip("拖选文字或双击句子；Ctrl+滚轮缩放；更多阅读操作中可查找句子或保存PDF批注")
         self.scroll.setStyleSheet("QScrollArea{background:#e1e7ed;border:1px solid #ccd5dc}")
@@ -449,6 +458,16 @@ class ReaderPanel(QWidget):
             if watched is self.doc_text or self.marks.state()!=QAbstractItemView.State.EditingState:
                 self.delete_mark(); return True
         return super().eventFilter(watched,event)
+
+    def preload_changed(self,done,total,state):
+        self.preload_panel.setVisible(state not in {'ready','empty'})
+        self.preload_progress.setRange(0,total); self.preload_progress.setValue(done)
+        self.preload_progress.setFormat(f'全文预加载 {done}/{total}' if total else '正在读取全文信息…')
+        self.preload_button.setText('暂停预载' if state=='loading' else '继续预载' if state=='paused' else '重试预载')
+
+    def toggle_preload(self):
+        if self.pdf_view.loading: self.pdf_view.pause_loading()
+        else: self.pdf_view.resume_loading()
 
     @property
     def canvas(self): return self.pdf_view.canvas

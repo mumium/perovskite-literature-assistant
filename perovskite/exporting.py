@@ -19,6 +19,7 @@ def markdown(store, article_id):
         for evidence in story["evidence"]:
             text.append(f"- {evidence['evidence_id']} | {evidence['file_id']} | {evidence['loc_id']} | {evidence['figure'] or '图表未报告'}\n  > {evidence['quote']}")
     text.extend(["", "## 人工笔记", a["notes"] or "未记录"])
+    text.extend(['', '手动分类：'+('；'.join(c['name'] for c in store.article_categories(article_id)) or '未分类')])
     text.extend(["", "## 原文高亮与批注"])
     for file in store.files(article_id):
         for mark in store.highlights(file["file_id"]):
@@ -41,6 +42,7 @@ def excel_export(store, ids, target, cancel=lambda: False):
         "阅读卡": ["article_id", "项目", "类别", "内容", "证据ID", "人工核验"],
         "修订历史": ["history_id", "article_id", "范围", "旧值JSON", "新值JSON", "来源", "UTC时间"],
         "高亮批注": ["article_id", "file_id", "mark_id", "文件名", "文件SHA256", "类型", "原文", "位置JSON", "颜色", "批注", "创建UTC", "修改UTC"],
+        "手动分类": ["article_id", "category_id", "类别", "归类UTC"],
     }
     sheets = {k: book.create_sheet(k) for k in headers}
     for name, cols in headers.items():
@@ -65,6 +67,8 @@ def excel_export(store, ids, target, cancel=lambda: False):
             raise InterruptedError("导出已取消")
         a = store.article(aid)
         m = a["metadata"]
+        for category in store.rows('SELECT ac.*,c.name FROM article_categories ac JOIN categories c USING(category_id) WHERE article_id=?',(aid,)):
+            append('手动分类',[aid,category['category_id'],category['name'],category['assigned']])
         append("文献", [aid, m.get("title"), m.get("title_zh"), m.get("journal"), m.get("year"), m.get("doi"), "; ".join(m.get("authors", [])), m.get("material"), m.get("structure"), "; ".join(m.get("tags", [])), next((r["state"] for r in store.list_articles() if r["article_id"]==aid), ""), dumps(m), dumps(a["candidates"]), a["notes"]])
         for f in store.files(aid):
             append("附件", [aid] + [f[k] for k in ["file_id", "sha256", "name", "role", "path", "status", "reason", "pairing"]])

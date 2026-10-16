@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
 from .exchange import preview, apply_result, strict_json, export_package, evidence_checks, semantic_validate
 from .exporting import excel_export, markdown
 from .schema import META_FIELDS, STORY_FIELDS, TAGS, PROMPT, STORY, PROCESS
-from .store import Store, dumps, atomic_json, restore, uid
+from .store import Store, dumps, atomic_json, restore, uid, UNFILED
+from .categories import ArticleTable,CategoryTree
 from .network import crossref, analyze
 from .reader import ReaderPanel
 from .editing import InlineDelegate,EDIT_ROLE,bind,text_value,parse_value,save_content_edit
@@ -80,6 +81,7 @@ class Window(QMainWindow):
             self.lock.unlock()
             raise
         self.article_id = None
+        self.category_id=None
         self.worker = None
         self.busy_controls = []
         self.preview_file = None
@@ -133,7 +135,19 @@ class Window(QMainWindow):
         self.sidebar.itemClicked.connect(self.sidebar_filter)
         self.sidebar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sidebar.customContextMenuRequested.connect(lambda _:self.manage_tags())
-        split.addWidget(self.sidebar)
+        self.sidebar_panel=QWidget(); side=QVBoxLayout(self.sidebar_panel); side.setContentsMargins(0,0,0,0); side.setSpacing(3)
+        self.sidebar_panel.setMaximumWidth(280); self.sidebar_panel.setMinimumWidth(130)
+        categorybar=QHBoxLayout(); categorybar.addWidget(QLabel('手动分类'),1)
+        for label,tip,callback in [('+','创建类别',self.create_category),('✎','重命名类别',self.rename_category),('−','删除类别，保留文献',self.delete_category)]:
+            button=QPushButton(label); button.setFixedWidth(24); button.setToolTip(tip); button.setAccessibleName(tip); button.clicked.connect(callback); categorybar.addWidget(button); self.busy_controls.append(button)
+        side.addLayout(categorybar)
+        self.category_tree=CategoryTree(self.store.root); self.category_tree.setHeaderHidden(True); self.category_tree.setIndentation(10)
+        self.category_tree.setMinimumHeight(100); self.category_tree.setMaximumHeight(230)
+        self.category_tree.setToolTip('将文献清单中的文献按住鼠标拖入类别；Ctrl/Shift可多选。一篇文献可加入多个类别。右键可移出、改名或删除类别。')
+        self.category_tree.itemClicked.connect(self.category_clicked); self.category_tree.articlesDropped.connect(self.classify_articles)
+        self.category_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.category_tree.customContextMenuRequested.connect(self.category_menu)
+        side.addWidget(self.category_tree,1); side.addWidget(self.sidebar,2); split.addWidget(self.sidebar_panel)
+        self.refresh_categories()
         center = QWidget()
         self.center_panel = center
         cl = QVBoxLayout(center)
@@ -161,7 +175,7 @@ class Window(QMainWindow):
         self.list_details.setToolTip("展开或收起期刊、SI数量及处理状态列；悬停标题也可查看这些信息")
         self.list_details.toggled.connect(lambda visible:[self.table.setColumnHidden(col,not visible) for col in [1,2,3,4]])
         countbar.addWidget(self.list_details); cl.addLayout(countbar)
-        self.table = QTableWidget(0, 5)
+        self.table = ArticleTable(self.store.root)
         self.table.setHorizontalHeaderLabels(["文献标题", "期刊 / 年份", "SI数", "处理状态","通讯作者"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -182,7 +196,7 @@ class Window(QMainWindow):
         for col in [1,2,3,4]: self.table.setColumnHidden(col,True)
         self.table.itemSelectionChanged.connect(self.select_article)
         cl.addWidget(self.table, 1)
-        help_label=QLabel("拖入导入 · Ctrl/Shift多选比较")
+        help_label=QLabel("拖到左侧分类 · Ctrl/Shift多选")
         help_label.setToolTip("配对建议仅供确认，同DOI不同版本均保留；悬停单元格可查看完整标题和状态")
         cl.addWidget(help_label)
         split.addWidget(center)
@@ -190,7 +204,7 @@ class Window(QMainWindow):
         split.addWidget(self.tabs)
         split.setChildrenCollapsible(False)
         split.setStretchFactor(0,0); split.setStretchFactor(1,1); split.setStretchFactor(2,3)
-        split.setSizes([128,380,1000])
+        split.setSizes([170,380,1000])
         self.meta_tab = QWidget()
         ml = QVBoxLayout(self.meta_tab)
         self.meta = QTableWidget(0,2); self.meta.setHorizontalHeaderLabels(['文献信息','内容（双击编辑）'])
@@ -297,6 +311,66 @@ class Window(QMainWindow):
 
     @property
     def preview_image(self): return self.reader.canvas
+
+    def refresh_categories(self):
+        self.category_tree.blockSignals(True); self.category_tree.clear()
+        entries=[(None,'全部文献'),(UNFILED,'未分类')]+[(c['category_id'],f"{c['name']}  ({c['article_count']})") for c in self.store.categories()]
+        for cid,name in entries:
+            item=QTreeWidgetItem([name]); item.setData(0,Qt.ItemDataRole.UserRole,cid); item.setToolTip(0,name)
+            item.setIcon(0,icon('folder')); self.category_tree.addTopLevelItem(item)
+            if cid==self.category_id: self.category_tree.setCurrentItem(item)
+        self.category_tree.blockSignals(False)
+
+    def category_clicked(self,item,_=0):
+        self.category_id=item.data(0,Qt.ItemDataRole.UserRole); self.refresh()
+
+    def current_category(self):
+        item=self.category_tree.currentItem(); cid=item.data(0,Qt.ItemDataRole.UserRole) if item else None
+        return cid if cid and cid!=UNFILED else None
+
+    def create_category(self):
+        name,ok=QInputDialog.getText(self,'创建类别','类别名称：')
+        if ok:
+            try: self.store.create_category(name); self.refresh_categories()
+            except ValueError as exc: self.error(str(exc))
+
+    def rename_category(self):
+        cid=self.current_category()
+        if not cid: return
+        name,ok=QInputDialog.getText(self,'重命名类别','类别名称：',text=self.store.category(cid)['name'])
+        if ok:
+            try: self.store.rename_category(cid,name); self.refresh_categories()
+            except ValueError as exc: self.error(str(exc))
+
+    def delete_category(self):
+        cid=self.current_category()
+        if not cid: return
+        self.store.delete_category(cid)
+        if self.category_id==cid: self.category_id=None
+        self.refresh(); self.status.setText('已删除类别，文献和附件完整保留')
+
+    def classify_articles(self,cid,ids):
+        if self.worker: self.status.setText('当前任务完成后可继续分类'); return
+        try:
+            count=self.store.assign_category(ids,cid); name=self.store.category(cid)['name']
+            self.refresh_categories(); self.status.setText(f'已将 {count} 篇文献加入“{name}”；重复归类自动跳过')
+        except ValueError as exc: self.error(str(exc))
+
+    def remove_from_category(self):
+        cid=self.current_category(); ids=self.selected_ids()
+        if cid and ids:
+            self.store.remove_category(ids,cid); self.refresh(); self.status.setText('已移出类别，文献和附件完整保留')
+
+    def category_menu(self,point):
+        from PySide6.QtWidgets import QMenu
+        item=self.category_tree.itemAt(point)
+        if item: self.category_tree.setCurrentItem(item)
+        menu=QMenu(self); menu.addAction('创建类别',self.create_category)
+        if self.current_category():
+            menu.addAction('将所选文献加入此类别',lambda:self.classify_articles(self.current_category(),self.selected_ids()))
+            menu.addAction('将所选文献移出此类别',self.remove_from_category)
+            menu.addSeparator(); menu.addAction('重命名类别',self.rename_category); menu.addAction('删除类别（保留文献）',self.delete_category)
+        menu.exec(self.category_tree.viewport().mapToGlobal(point))
 
     def refresh_sidebar(self):
         self.sidebar.clear()
@@ -475,9 +549,10 @@ class Window(QMainWindow):
         return [self.table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole) for index in self.table.selectionModel().selectedRows()]
 
     def refresh(self):
+        self.refresh_categories()
         previous = self.article_id
         filters = {self.filter_field.currentData(): self.filter_value.text()}
-        rows = self.store.list_articles(self.search.text(), filters)
+        rows = self.store.list_articles(self.search.text(), filters,self.category_id)
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         selected_row = None
@@ -510,6 +585,7 @@ class Window(QMainWindow):
             self.preview_file=self.preview_evidence=None
 
     def clear_filters(self):
+        self.category_id=None
         self.search.clear()
         self.filter_value.clear()
         self.refresh()
@@ -518,6 +594,7 @@ class Window(QMainWindow):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data:
             field, value = data
+            if not field: self.category_id=None
             if field:
                 self.filter_field.setCurrentIndex(self.filter_field.findData(field))
             self.filter_value.setText(value)
@@ -854,7 +931,7 @@ class Window(QMainWindow):
     def export_excel(self):
         ids = self.selected_ids()
         if not ids:
-            ids = [a["article_id"] for a in self.store.list_articles(self.search.text(), {self.filter_field.currentData(): self.filter_value.text()})]
+            ids = [a["article_id"] for a in self.store.list_articles(self.search.text(), {self.filter_field.currentData(): self.filter_value.text()},self.category_id)]
         if not ids:
             self.error("没有可导出的文献"); return
         path, _ = QFileDialog.getSaveFileName(self, f"导出比较表（{len(ids)}篇，保留样品和测量条件）", "钙钛矿文献比较.xlsx", "Excel (*.xlsx)")
@@ -909,7 +986,7 @@ class Window(QMainWindow):
         self._reading_mode = not self._reading_mode
         if self._reading_mode:
             self._reading_sizes = self.main_split.sizes()
-        self.sidebar.setVisible(not self._reading_mode)
+        self.sidebar_panel.setVisible(not self._reading_mode)
         self.center_panel.setVisible(not self._reading_mode)
         self.reader.focus_button.setText("退出阅读模式" if self._reading_mode else "阅读模式")
         if not self._reading_mode:
@@ -1016,9 +1093,10 @@ class Window(QMainWindow):
     def show_help(self):
         text="""首次选择数据目录后自动记忆。顶部图标悬停显示功能名称，包含导入、关联附件、分析包交换、标签管理、换库、备份恢复等。
 导入文件后可直接导出分析包，无需确认角色或配对。需要SI时，先选正文文献，再点关联附件浏览电脑文件。
+左侧手动分类的+按钮可创建类别；将清单文献拖入类别，Ctrl/Shift可多选。一篇文献可归入多个类别。右键可移出、改名或删除类别，文献与附件保留。
 自定义标签可新增、重命名、删除并勾选应用到当前文献；左侧标签上右键也可打开管理。
 文献信息、核心故事、工艺与性能字段可直接双击编辑。单行Enter保存，多行Ctrl+Enter保存，Esc取消，离开编辑框也保存；修订历史保留。编辑后的科学结论需重新核验。
-原文可连续滚动所有页面；页码下箭头向后、上箭头向前。缩放立即使用缓存，必要时后台提升清晰度。支持单字母选择，查找句子、高亮与删除高亮常驻。
+原文打开后后台预加载全部页面，显示进度并可暂停、继续。加载完成后滚动、跳页、缩放均复用图像。全文图像预算512MiB，超长文档会明确提示分辨率调整。页码下箭头向后、上箭头向前。支持单字母选择，查找句子、高亮与删除高亮常驻。
 点击原文高亮或列表记录后按Delete删除；批注列双击直接编辑，位置/原文列双击跳转。删除键在文字输入框内正常删字。
 切换左侧文献保留当前页签。详情列包含通讯作者，完整名单可悬停查看。
 默认离线，不内置OCR；DOC暂不解析。PDF另存/写回批注在更多阅读操作中。所有数据在所选目录，附件可随目录搬移。
@@ -1036,6 +1114,7 @@ class Window(QMainWindow):
             QTimer.singleShot(100,self.close)
             event.ignore(); return
         self.reader.stop()
+        self.reader.pdf_view.clear()
         self.store.close()
         self.lock.unlock()
         event.accept()

@@ -88,7 +88,7 @@ def test_custom_tags_rename_remove_search_backup_and_restore(tmp_path):
         assert store.tag_names()==['修改后标签','未应用的新标签']
         assert store.article(aid)['metadata']['tags']==['修改后标签']
 
-def test_continuous_pages_lazy_scroll_arrows_zoom_cache_and_search(tmp_path,qt):
+def test_continuous_pages_full_preload_scroll_arrows_zoom_cache_and_search(tmp_path,qt):
     import fitz
     source=tmp_path/'SYNTHETIC continuous 18 pages.pdf'
     with fitz.open() as doc:
@@ -98,7 +98,8 @@ def test_continuous_pages_lazy_scroll_arrows_zoom_cache_and_search(tmp_path,qt):
         result=store.import_file(source); panel=ReaderPanel(store); panel.resize(960,820); panel.show(); panel.open_file(result['file_id']); wait(panel,qt)
         view=panel.pdf_view
         assert len(view.pages)==18 and view.document.height()>view.scroll.viewport().height()*10
-        assert view.render_count<=4 and view.pages[17].data is None
+        assert view.render_count==18 and view.full_ready
+        assert all(p.data and not p._image.isNull() for p in view.pages)
         assert view.document.width()>=panel.canvas.width()
         panel.page.stepBy(-1); wait(panel,qt)
         assert panel.page.value()==2 and view.current==1
@@ -111,6 +112,7 @@ def test_continuous_pages_lazy_scroll_arrows_zoom_cache_and_search(tmp_path,qt):
         assert view.render_count==before,'缩小已缓存页面不应重新生成PDF图片'
         view.scroll.verticalScrollBar().setValue(view.pages[17].y()); wait(panel,qt)
         assert panel.page.value()>=17 and view.pages[17].data
+        assert view.render_count==before,'全文预加载后跳页和缩放不能重新渲染'
         assert view.cache_bytes<=view.cache_limit
         panel.query.setText('unique target 12'); panel.find_sentence(); wait(panel,qt)
         assert panel.canvas.data['page_index']==11 and panel.canvas.selected_payload()['anchors']

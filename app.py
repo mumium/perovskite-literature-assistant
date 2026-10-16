@@ -86,6 +86,10 @@ def main():
             fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
             reader_phase["automatic_original"]=window.reader.file_id==fid
             reader_phase['tab_preserved']=window.tabs.currentWidget() is window.meta_tab
+            category=window.store.create_category('合成验收 · 复现实验')
+            window.classify_articles(category,[aid])
+            window.store.rename_category(category,'合成验收 · 已分类')
+            reader_phase['manual_categories']=window.store.list_articles(category_id=category)[0]['article_id']==aid
             window.tabs.setCurrentWidget(window.story_tab)
             window.grab().save(str(root / "GUI故事.png"))
             fid = next(f["file_id"] for f in window.store.files(aid) if f["role"] == "main")
@@ -127,6 +131,7 @@ def main():
             if reader_phase['step']==4:
                 view=window.reader.pdf_view
                 reader_phase['continuous_pages']=len(view.pages)==3 and window.reader.page.value()==2 and view.document.height()>view.scroll.viewport().height()
+                reader_phase['full_preload']=view.full_ready and len(view.cache)==3 and all(p.data and not p._image.isNull() for p in view.pages)
                 count=view.render_count; width=window.reader.canvas.width()
                 window.reader.zoom.setValue(50)
                 reader_phase['instant_zoom']=view.render_count==count and window.reader.canvas.width()!=width
@@ -166,7 +171,7 @@ def main():
             def unexpected_picker(*args): raise AssertionError("已记忆的目录不应再次弹出选择窗口")
             startup_memory=StartupMemory(memory.app_directory,memory.fallback_directory).choose_directory(unexpected_picker)==str(window.store.root)
             compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
-            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved']}
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories']}
             atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
             application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(reader_checks.values()) else 1)

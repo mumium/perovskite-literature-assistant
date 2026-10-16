@@ -138,7 +138,7 @@ def test_migration_from_real_v1_copy_preserves_old_records(reader_library,tmp_pa
     with sqlite3.connect(old/"library.sqlite") as conn:
         conn.execute("DROP TABLE highlights"); conn.execute("DROP TABLE reader_state"); conn.execute("PRAGMA user_version=1")
     with Store(old) as upgraded:
-        assert upgraded.db.execute("PRAGMA user_version").fetchone()[0]==2
+        assert upgraded.db.execute("PRAGMA user_version").fetchone()[0]==3
         assert upgraded.article(pdf["article_id"])
         assert upgraded.file(pdf["file_id"])["sha256"]==store.file(pdf["file_id"])["sha256"]
         assert list((old/"migrations").glob("library-v1-*.sqlite"))

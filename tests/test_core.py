@@ -171,7 +171,7 @@ def test_batch_errors_and_exports_backup(library, tmp_path):
     excel_export(store, [aid], target)
     from openpyxl import load_workbook
     book = load_workbook(target)
-    assert len(book.sheetnames) == 8
+    assert len(book.sheetnames) == 9
     assert book["样品工艺"].max_row == 6
     assert book["证据"].max_row > 3
     assert "正文和SI" in markdown(store, aid)

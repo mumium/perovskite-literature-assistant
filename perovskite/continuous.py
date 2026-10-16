@@ -1,4 +1,4 @@
-"""Continuous PDF pages, visible-page loading and bounded high-resolution cache."""
+"""Continuous PDF pages, complete background preloading and retained page images."""
 import math
 import threading
 from collections import OrderedDict
@@ -42,6 +42,47 @@ class PdfJob(QThread):
         except Exception as exc:
             if not self.cancelled.is_set(): self.failed.emit(str(exc))
 
+class PreloadJob(QThread):
+    metadata=Signal(object)
+    pageReady=Signal(int,object)
+    pageFailed=Signal(int,str)
+    failed=Signal(str)
+    def __init__(self,path,sha,initial,quality,density,budget,info=None,indices=None):
+        super().__init__(); self.cancelled=threading.Event()
+        self.path,self.sha,self.initial,self.quality,self.density,self.budget=path,sha,initial,quality,density,budget
+        self.info,self.indices=info,indices
+    def run(self):
+        import fitz
+        from .reader import load_pdf_page
+        try:
+            info=self.info or pdf_info(self.path,self.sha,self.cancelled.is_set)
+            if not info['pages']: raise ValueError('PDF没有页面')
+            area=sum(g['width']*g['height'] for g in info['pages'])
+            # RGB images are shared with their canvases, without PNG copies or
+            # QPixmap duplication. Leave room for stride/rounding overhead.
+            density=min(self.density,math.sqrt(self.budget*.95/(area*3))/(self.quality/75))
+            info=dict(info,density=density,quality=self.quality,reduced=density<self.density-.001)
+            if self.cancelled.is_set(): return
+            self.metadata.emit(info)
+            indices=list(range(len(info['pages']))) if self.indices is None else self.indices
+            indices=sorted(indices,key=lambda i:(i!=self.initial,i))
+            with PDF_LOCK: doc=fitz.open(self.path)
+            try:
+                for index in indices:
+                    if self.cancelled.is_set(): return
+                    stat=self.path.stat()
+                    if (stat.st_size,stat.st_mtime_ns)!=info['stat']: raise ValueError('附件在阅读期间被修改，请重新导入')
+                    try:
+                        data=load_pdf_page(self.path,index,self.quality,pixel_ratio=density,cancel=self.cancelled.is_set,document=doc,raw_image=True)
+                        self.pageReady.emit(index,data)
+                    except InterruptedError: return
+                    except Exception as exc: self.pageFailed.emit(index,str(exc))
+            finally:
+                with PDF_LOCK: doc.close()
+        except InterruptedError: pass
+        except Exception as exc:
+            if not self.cancelled.is_set(): self.failed.emit(str(exc))
+
 class ContinuousPdfView(QWidget):
     currentChanged=Signal(int)
     selectionChanged=Signal(str)
@@ -51,14 +92,15 @@ class ContinuousPdfView(QWidget):
     zoomRequested=Signal(int)
     status=Signal(str)
     error=Signal(str)
+    loadingChanged=Signal(int,int,str)
     def __init__(self,canvas_factory,parent=None):
         super().__init__(parent)
         self.factory=canvas_factory; self.pages=[]; self.info=None; self.file_id=None
         self.worker=None; self.serial=0; self.jobs=[]; self.current=0; self.active_canvas=None
-        self.cache=OrderedDict(); self.cache_bytes=0; self.cache_limit=128*1024**2
+        self.cache=OrderedDict(); self.cache_bytes=0; self.cache_limit=512*1024**2
         self.zoom=100; self.fit=False; self.marks=[]; self.query=''; self.hits={}; self.evidence=None
         self.render_count=0; self.failed_pages=set(); self._layout_changing=False
-        self.stopped=True
+        self.stopped=True; self.preload_request=None; self.full_ready=False; self.paused=False; self.loading=False; self.load_error=None
         self.selection_span=None
         layout=QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         self.scroll=QScrollArea(); self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
@@ -73,74 +115,94 @@ class ContinuousPdfView(QWidget):
     @property
     def canvas(self): return self.active_canvas or self.empty
     @property
-    def pending(self): return self.jobs or self.timer.isActive()
+    def pending(self): return self.jobs or self.preload_request or self.timer.isActive()
 
     def stop(self):
-        self.stopped=True; self.serial+=1; self.jobs.clear(); self.timer.stop()
+        self.stopped=True; self.serial+=1; self.jobs.clear(); self.timer.stop(); self.preload_request=None; self.loading=False
         if self.worker: self.worker.cancelled.set()
 
     def clear(self):
         self.stop(); self.info=None; self.file_id=None; self.active_canvas=None; self.selection_span=None
-        for page in self.pages: self.page_layout.removeWidget(page); page.deleteLater()
-        self.pages=[]; self.document.setFixedSize(1,1)
+        for page in self.pages:
+            self.page_layout.removeWidget(page); page.release_bitmap(True); page.deleteLater()
+        self.pages=[]; self.cache.clear(); self.cache_bytes=0; self.full_ready=False
+        self.document.setFixedSize(1,1); self.loadingChanged.emit(0,0,'empty')
 
     def open(self,path,file_id,expected_hash,page_index,zoom,fit,marks,evidence=None):
-        self.clear(); self.path=path; self.file_id=file_id; self.zoom=zoom; self.fit=fit
-        self.stopped=False
+        self.clear(); self.path=path; self.expected_hash=expected_hash; self.file_id=file_id; self.zoom=zoom; self.fit=fit
+        self.stopped=False; self.paused=False; self.load_error=None; self.render_count=0
         self.current=page_index; self.marks=marks; self.evidence=evidence; self.hits={}; self.query=''; self.failed_pages=set()
-        self.jobs.append(('info',None,None,lambda cancel:pdf_info(path,expected_hash,cancel)))
-        self.start_job()
+        self.quality=max(100,min(400,math.ceil(zoom/100)*100))
+        self.preload_request=(None,None); self.start_job()
 
     def start_job(self):
-        if self.worker or not self.jobs: return
-        kind,index,quality,function=self.jobs.pop(0); serial=self.serial; fid=self.file_id
-        worker=PdfJob(function); self.worker=worker
-        worker.page_key=(fid,index,quality) if kind=='page' else None
-        def ready(result):
-            if serial!=self.serial or fid!=self.file_id: return
-            if kind=='info':
+        if self.worker or self.stopped: return
+        serial=self.serial; fid=self.file_id
+        if self.preload_request is not None:
+            info,indices=self.preload_request; self.preload_request=None; self.loading=True; self.paused=False
+            worker=PreloadJob(self.path,self.expected_hash,self.current,self.quality,max(2,self.devicePixelRatioF()),self.cache_limit,info,indices)
+            self.worker=worker; self.loadingChanged.emit(len(self.cache),len(self.pages),'loading')
+            def metadata(result):
+                if serial!=self.serial or fid!=self.file_id: return
                 self.info=result
-                for i,geometry in enumerate(result['pages']):
-                    canvas=self.factory(); canvas.geometry_info=geometry; canvas.page_index=i
-                    canvas.document_payload=self.selected_payload
-                    canvas.selectionChanged.connect(lambda text,c=canvas:self.selected(c,text))
-                    canvas.highlightRequested.connect(self.highlightRequested.emit)
-                    canvas.zoomRequested.connect(self.zoomRequested.emit)
-                    canvas.markSelected.connect(self.markSelected.emit)
-                    canvas.deleteRequested.connect(self.deleteRequested.emit)
-                    canvas.dragRequested.connect(lambda start,point,c=canvas:self.drag_across(c,start,point))
-                    self.page_layout.addWidget(canvas,0,Qt.AlignmentFlag.AlignHCenter); self.pages.append(canvas); canvas.show()
-                self.current=max(0,min(self.current,len(self.pages)-1))
-                self.set_zoom(self.zoom,self.fit,False); self.navigate(self.current)
-                if self.evidence: self.find(self.evidence['quote'],evidence=True)
-            elif kind=='page':
-                image=QImage.fromData(result['png']); size=image.width()*image.height()*4+len(result['png'])
-                key=(fid,index,quality)
-                if key in self.cache: self.cache_bytes-=self.cache.pop(key)[1]
-                self.cache[key]=(result,size); self.cache_bytes+=size; self.render_count+=1
-                self.show_page(index,result)
-                self.trim_cache()
+                if not self.pages:
+                    for i,geometry in enumerate(result['pages']):
+                        canvas=self.factory(); canvas.geometry_info=geometry; canvas.page_index=i
+                        canvas.document_payload=self.selected_payload
+                        canvas.selectionChanged.connect(lambda text,c=canvas:self.selected(c,text))
+                        canvas.highlightRequested.connect(self.highlightRequested.emit); canvas.zoomRequested.connect(self.zoomRequested.emit)
+                        canvas.markSelected.connect(self.markSelected.emit); canvas.deleteRequested.connect(self.deleteRequested.emit)
+                        canvas.dragRequested.connect(lambda start,point,c=canvas:self.drag_across(c,start,point))
+                        canvas.setText(f'实际页 {i+1} · 等待全文预加载')
+                        self.page_layout.addWidget(canvas,0,Qt.AlignmentFlag.AlignHCenter); self.pages.append(canvas); canvas.show()
+                    self.current=max(0,min(self.current,len(self.pages)-1)); self.set_zoom(self.zoom,self.fit,False); self.navigate(self.current)
+                    if self.evidence: self.find(self.evidence['quote'],evidence=True)
                 self.report_status()
-            elif kind=='search':
+            def page_ready(index,data):
+                if serial!=self.serial or fid!=self.file_id: return
+                key=(fid,index,self.quality); size=data['image'].sizeInBytes()
+                if key in self.cache: self.cache_bytes-=self.cache.pop(key)[1]
+                self.cache[key]=(data,size); self.cache_bytes+=size; self.render_count+=1; self.failed_pages.discard(index)
+                self.show_page(index,data); self.loadingChanged.emit(len(self.cache),len(self.pages),'loading'); self.report_status()
+            def page_failed(index,message):
+                if serial!=self.serial: return
+                self.failed_pages.add(index); self.pages[index].setText(f'第 {index+1} 页加载失败：{message}'); self.report_status()
+            worker.metadata.connect(metadata); worker.pageReady.connect(page_ready); worker.pageFailed.connect(page_failed)
+        elif self.jobs:
+            function=self.jobs.pop(0); worker=PdfJob(function); self.worker=worker
+            def ready(result):
+                if serial!=self.serial or fid!=self.file_id: return
                 self.hits=result
+                for index,page in enumerate(self.pages):
+                    if page.data: self.show_page(index,page.data)
                 if result:
                     target=next((i for i in sorted(result) if i>=self.current),min(result))
-                    if self.evidence:
-                        target=next((i for i in result if self.evidence['loc_id'].startswith(f'pdf:p{i}:')),target)
-                    self.navigate(target)
-                    if self.pages[target].data: self.show_page(target,self.pages[target].data)
-                    self.status.emit(f'找到 {sum(len(v) for v in result.values())} 个文字区域；已跳转到实际页 {target+1}')
+                    if self.evidence: target=next((i for i in result if self.evidence['loc_id'].startswith(f'pdf:p{i}:')),target)
+                    self.navigate(target); self.status.emit(f'找到 {sum(len(v) for v in result.values())} 个文字区域；已跳转到实际页 {target+1}')
                 else: self.status.emit('全文未匹配，请缩短句子或直接拖选字符')
+            worker.ready.connect(ready)
+        else: return
         def failed(message):
             if serial!=self.serial: return
-            if index is not None:
-                self.failed_pages.add(index); self.pages[index].setText(f'第 {index+1} 页加载失败：{message}')
-            self.status.emit(message); self.error.emit(message)
+            self.load_error=message; self.status.emit(message); self.error.emit(message)
         def finish():
             self.worker=None; worker.deleteLater()
+            if serial==self.serial and isinstance(worker,PreloadJob):
+                self.loading=False; self.full_ready=bool(self.pages) and all(p.data for p in self.pages) and not self.load_error
+                state='ready' if self.full_ready else 'paused' if self.paused else 'failed'
+                self.loadingChanged.emit(len(self.cache),len(self.pages),state); self.report_status()
             self.start_job()
-            if self.info and not self.jobs and not self.stopped: self.timer.start(30)
-        worker.ready.connect(ready); worker.failed.connect(failed); worker.finished.connect(finish); worker.start()
+        worker.failed.connect(failed); worker.finished.connect(finish); worker.start()
+
+    def pause_loading(self):
+        if self.loading and self.worker:
+            self.paused=True; self.worker.cancelled.set()
+
+    def resume_loading(self):
+        if self.worker or self.full_ready or self.stopped: return
+        self.load_error=None; self.paused=False
+        missing=[i for i,p in enumerate(self.pages) if not p.data] if self.info else None
+        self.preload_request=(self.info,missing); self.start_job()
 
     def scale_for(self,geometry):
         return max(.05,(self.scroll.viewport().width()-20)/geometry['width']) if self.fit else self.zoom/75
@@ -161,13 +223,13 @@ class ContinuousPdfView(QWidget):
         if preserve and self.pages:
             self.scroll.verticalScrollBar().setValue(round(self.pages[anchor].y()+fraction*self.pages[anchor].height()))
         self._layout_changing=False
-        self.timer.start(180); self.report_status()
+        self.report_status()
 
     def navigate(self,index):
         if not self.pages: return
         index=max(0,min(index,len(self.pages)-1)); self.current=index; self.active_canvas=self.pages[index]
         self.scroll.verticalScrollBar().setValue(max(0,self.pages[index].y()-8))
-        self.currentChanged.emit(index); self.timer.start(1)
+        self.currentChanged.emit(index); self.report_status()
 
     def selected(self,canvas,text):
         self.selection_span=None
@@ -207,8 +269,9 @@ class ContinuousPdfView(QWidget):
         if self._layout_changing or not self.pages: return
         y=self.scroll.verticalScrollBar().value()+min(60,self.scroll.viewport().height()//5)
         index=next((i for i,p in enumerate(self.pages) if p.y()+p.height()>y),len(self.pages)-1)
+        if index==self.current: return
         self.current=index; self.active_canvas=self.pages[index]; self.currentChanged.emit(index)
-        self.timer.start(70)
+        self.report_status()
 
     def visible_indices(self):
         top=self.scroll.verticalScrollBar().value(); bottom=top+self.scroll.viewport().height()
@@ -220,31 +283,7 @@ class ContinuousPdfView(QWidget):
         key=min(candidates,key=lambda k:k[2]); value=self.cache[key][0]; self.cache.move_to_end(key); return value
 
     def request_visible(self):
-        if not self.info or not self.pages or self.stopped: return
-        from .reader import load_pdf_page
-        visible=self.visible_indices(); nearby=set(visible)
-        for i in visible: nearby.update(n for n in (i-1,i+1) if 0<=n<len(self.pages))
-        # Drop obsolete queued render work after a fast scroll/zoom.
-        self.jobs=[job for job in self.jobs if job[0]!='page']
-        for index in sorted(nearby,key=lambda i:(i not in visible,abs(i-self.current))):
-            if index in self.failed_pages: continue
-            effective=self.scale_for(self.pages[index].geometry_info)*75
-            quality=max(100,min(400,math.ceil(effective/100)*100)) if index in visible else 100
-            data=self.cached(index,quality)
-            if data:
-                if self.pages[index].data is not data or self.pages[index].pixmap() is None or self.pages[index].pixmap().isNull(): self.show_page(index,data)
-                continue
-            if self.worker and getattr(self.worker,'page_key',None)==(self.file_id,index,quality): continue
-            path=self.path; stat=self.info['stat']; density=max(2,self.devicePixelRatioF())
-            text_data=self.cached(index,100)
-            def render(cancel,index=index,quality=quality,text_data=text_data):
-                current=path.stat()
-                if (current.st_size,current.st_mtime_ns)!=stat: raise ValueError('附件在阅读期间被修改，请重新导入')
-                return load_pdf_page(path,index,quality,pixel_ratio=density,text_data=text_data,cancel=cancel)
-            self.jobs.append(('page',index,quality,render))
-        for index,page in enumerate(self.pages):
-            if index not in nearby: page.release_bitmap()
-        self.start_job()
+        self.report_status()
 
     def show_page(self,index,data):
         page=self.pages[index]; active=page.selection; manual=page.manual_selection
@@ -261,19 +300,12 @@ class ContinuousPdfView(QWidget):
         self.marks=marks
         for page in self.pages: page.marks=marks; page.update()
 
-    def trim_cache(self):
-        while self.cache_bytes>self.cache_limit and len(self.cache)>1:
-            key,(data,size)=self.cache.popitem(last=False); self.cache_bytes-=size
-            if key[0]==self.file_id and key[1]<len(self.pages):
-                page=self.pages[key[1]]
-                if key[1] not in self.visible_indices() and not any(k[:2]==key[:2] for k in self.cache): page.release_bitmap(True)
-
     def find(self,query,evidence=False):
         self.query=query
         for page in self.pages: page.clear_selection()
         if not evidence: self.evidence=None
         path=self.path
-        self.jobs.insert(0,('search',None,None,lambda cancel:pdf_search(path,query,cancel)))
+        self.jobs.append(lambda cancel:pdf_search(path,query,cancel))
         self.start_job()
 
     def report_status(self):
@@ -281,4 +313,10 @@ class ContinuousPdfView(QWidget):
         page=self.pages[self.current]; zoom=round(self.scale_for(page.geometry_info)*75)
         text=f'实际页 {self.current+1}/{len(self.pages)} · {zoom}% · 连续滚动 · {len(self.marks)}条高亮'
         if page.data and not page.data['words']: text+=' · 本页无可选文字，扫描页需OCR'
+        loaded=len(self.cache)
+        text+=f' · 全文已加载 {loaded}/{len(self.pages)}' if self.full_ready else f' · 全文预加载 {loaded}/{len(self.pages)}'
+        if self.paused: text+='（已暂停，可继续）'
+        if self.failed_pages: text+=f' · {len(self.failed_pages)}页失败，可重试'
+        if self.info and self.info.get('reduced'): text+=' · 已按全文内存预算优化分辨率'
+        if self.load_error: text+=' · '+self.load_error
         self.status.emit(text)
