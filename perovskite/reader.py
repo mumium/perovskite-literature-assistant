@@ -484,25 +484,49 @@ class ReaderPanel(QWidget):
         layout.addWidget(pages,1)
         markpanel=QWidget(); self.mark_panel=markpanel; marklayout=QVBoxLayout(markpanel); marklayout.setContentsMargins(0,0,0,0)
         marklayout.setSpacing(4)
-        row=QHBoxLayout(); self.color=QComboBox()
+        self.annotation_bar=QWidget(); self.annotation_bar.setObjectName('annotationBar')
+        arrow=(Path(__file__).resolve().parent.parent/'assets'/'chevron-down.svg').as_posix()
+        self.annotation_bar.setStyleSheet('''
+            QWidget#annotationBar QLineEdit,QWidget#annotationBar QComboBox,QWidget#annotationBar QPushButton{
+                border:1px solid #bdcbd5;border-radius:4px;background:#fff;color:#244e63;font-size:12px;}
+            QWidget#annotationBar QLineEdit{padding:0 8px;}
+            QWidget#annotationBar QComboBox{padding:0 22px 0 8px;}
+            QWidget#annotationBar QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:20px;border:none;}
+            QWidget#annotationBar QComboBox::down-arrow{image:url("@ARROW@");width:12px;height:12px;}
+            QWidget#annotationBar QPushButton{padding:0 8px;}
+            QWidget#annotationBar QPushButton:hover,QWidget#annotationBar QComboBox:hover{background:#edf4f8;border-color:#8aafc3;}
+            QWidget#annotationBar QPushButton:pressed,QWidget#annotationBar QPushButton:checked{background:#dcebf3;border-color:#8aafc3;}
+            QWidget#annotationBar QPushButton:disabled{color:#9aa8b1;background:#f5f7f9;}
+            QWidget#annotationBar QLineEdit:focus{border-color:#5792ad;}
+        '''.replace('@ARROW@',arrow))
+        row=QHBoxLayout(self.annotation_bar); row.setContentsMargins(0,0,0,0); row.setSpacing(6)
+        self.color=QComboBox(); self.color.setFixedSize(80,30); self.color.setToolTip('原文高亮颜色')
         for key,(name,hexcolor) in COLORS.items(): self.color.addItem(name,key)
         row.addWidget(self.color)
-        self.note=QLineEdit(); self.note.setMinimumWidth(60); self.note.setPlaceholderText("可选批注"); row.addWidget(self.note,1)
+        self.note=QLineEdit(); self.note.setMinimumWidth(60); self.note.setFixedHeight(30); self.note.setPlaceholderText("可选批注"); row.addWidget(self.note,1)
         self.note.editingFinished.connect(self.save_note_text)
-        self.highlight_button=QPushButton(); self.highlight_button.setFixedSize(30,26); self.highlight_button.setIconSize(QSize(22,22)); self.highlight_button.setIcon(icon('highlight'))
+        self.highlight_button=QPushButton(); self.highlight_button.setFixedSize(30,30); self.highlight_button.setIconSize(QSize(22,22)); self.highlight_button.setIcon(icon('highlight'))
         self.highlight_button.setToolTip('高亮（Shift+H）'); self.highlight_button.setAccessibleName('高亮'); self.highlight_button.clicked.connect(self.toggle_highlight); row.addWidget(self.highlight_button)
         self.note_font=QSpinBox(); self.note_font.setRange(6,48); self.note_font.setValue(11); self.note_font.setPrefix('字 ')
-        self.note_font.setFixedSize(88,30); self.note_font.setSingleStep(1); self.note_font.setKeyboardTracking(False)
-        self.note_font.setStyleSheet('''QSpinBox{padding:2px 24px 2px 3px;font-size:12px}
-            QSpinBox::up-button{subcontrol-origin:border;subcontrol-position:top right;width:21px;height:14px;border-left:1px solid #b9c9d2;border-bottom:1px solid #b9c9d2;background:#edf3f7}
-            QSpinBox::down-button{subcontrol-origin:border;subcontrol-position:bottom right;width:21px;height:15px;border-left:1px solid #b9c9d2;background:#edf3f7}
-            QSpinBox::up-button:hover,QSpinBox::down-button:hover{background:#d1e5ef}
-            QSpinBox::up-button:pressed,QSpinBox::down-button:pressed{background:#afcfdf}''')
-        self.note_font.setToolTip('选中批注后，点击右上箭头增大、右下箭头减小字号；每次1点，也可直接输入')
-        self.note_font.valueChanged.connect(lambda n:self.change_note_font(size=n)); row.addWidget(self.note_font)
-        self.note_color=QPushButton(); self.note_color.setIcon(icon('font_color')); self.note_color.setFixedWidth(30); self.note_color.setToolTip('选中批注的字体颜色'); self.note_color.clicked.connect(self.choose_note_color); row.addWidget(self.note_color)
-        self.marks_button=QPushButton("批注列表 ▾"); self.marks_button.setCheckable(True); row.addWidget(self.marks_button)
-        marklayout.addLayout(row)
+        self.note_font.setFixedSize(60,28); self.note_font.setSingleStep(1); self.note_font.setKeyboardTracking(False)
+        self.note_font.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons); self.note_font.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.note_font.setStyleSheet('QSpinBox{padding:0 3px;border:none;background:white;color:#244e63;font-size:12px;}')
+        self.note_font.setToolTip('批注字号（6–48点），可直接输入；用两侧−/＋按钮每次调整1点')
+        self.note_font_group=QWidget(); self.note_font_group.setObjectName('noteFontGroup'); self.note_font_group.setFixedSize(114,30)
+        self.note_font_group.setStyleSheet('QWidget#noteFontGroup{border:1px solid #bdcbd5;border-radius:4px;background:white;}')
+        fontrow=QHBoxLayout(self.note_font_group); fontrow.setContentsMargins(1,1,1,1); fontrow.setSpacing(0)
+        self.note_font_minus=QPushButton('−'); self.note_font_plus=QPushButton('＋')
+        for button,tip,callback in [(self.note_font_minus,'减小批注字体（每次1点）',self.note_font.stepDown),(self.note_font_plus,'增大批注字体（每次1点）',self.note_font.stepUp)]:
+            button.setFixedSize(26,28); button.setToolTip(tip); button.setAccessibleName(tip)
+            button.setAutoRepeat(True); button.setAutoRepeatDelay(400); button.setAutoRepeatInterval(90)
+            button.setStyleSheet('QPushButton{padding:0;border:none;border-radius:3px;background:#edf3f7;color:#244e63;font-size:17px;font-weight:600;} QPushButton:hover{background:#dcebf3;} QPushButton:pressed{background:#bdd9e7;} QPushButton:disabled{color:#a1adb5;background:#f5f7f9;}')
+            button.clicked.connect(callback)
+        fontrow.addWidget(self.note_font_minus); fontrow.addWidget(self.note_font); fontrow.addWidget(self.note_font_plus)
+        self.note_font.valueChanged.connect(self.sync_note_font_buttons); self.note_font.valueChanged.connect(lambda n:self.change_note_font(size=n)); row.addWidget(self.note_font_group)
+        self.note_color=QPushButton(); self.note_color.setIcon(icon('font_color')); self.note_color.setIconSize(QSize(22,22)); self.note_color.setFixedSize(30,30)
+        self.note_color.setToolTip('选中批注的字体颜色'); self.note_color.clicked.connect(self.choose_note_color); row.addWidget(self.note_color)
+        self.marks_button=QPushButton("批注列表 ▾"); self.marks_button.setCheckable(True); self.marks_button.setFixedHeight(30); self.marks_button.setMinimumWidth(88); self.marks_button.setToolTip('展开或收起批注列表'); row.addWidget(self.marks_button)
+        marklayout.addWidget(self.annotation_bar)
         self.mark_details=QWidget(); details=QVBoxLayout(self.mark_details); details.setContentsMargins(0,0,0,0); details.setSpacing(4)
         actions=QHBoxLayout()
         for label,callback in [("修改批注",self.edit_mark)]:
@@ -761,11 +785,16 @@ class ReaderPanel(QWidget):
         for page in self.pdf_view.pages: page.selected_mark=selected; page.update()
         self.highlight_button.setIcon(icon('unhighlight' if selected else 'highlight'))
         self.highlight_button.setToolTip(('取消高亮' if selected else '高亮')+'（Shift+H）'); self.highlight_button.setAccessibleName('取消高亮' if selected else '高亮')
-        self.note_font.setEnabled(bool(selected) and self.kind=='pdf'); self.note_color.setEnabled(bool(selected) and self.kind=='pdf')
+        self.note_font_group.setEnabled(bool(selected) and self.kind=='pdf'); self.note_color.setEnabled(bool(selected) and self.kind=='pdf')
         if item:
             mark=item.data(0,Qt.ItemDataRole.UserRole); self.note.setText(mark['note'])
             self.note_font.blockSignals(True); self.note_font.setValue(round(mark.get('appearance',{}).get('font_size',11))); self.note_font.blockSignals(False)
         elif selected is None and not self.note.hasFocus(): self.note.clear()
+        self.sync_note_font_buttons()
+
+    def sync_note_font_buttons(self,*_):
+        self.note_font_minus.setEnabled(self.note_font.value()>self.note_font.minimum())
+        self.note_font_plus.setEnabled(self.note_font.value()<self.note_font.maximum())
 
     def save_note_style(self,mark_id,appearance):
         if self.export_worker: return

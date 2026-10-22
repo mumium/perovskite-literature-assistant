@@ -121,14 +121,16 @@ def test_page_comment_drag_resize_font_edit_persist_and_native_export(tmp_path,q
     QTest.mousePress(box,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,handle)
     QTest.mouseMove(box,handle+QPoint(30,35),20); QTest.mouseRelease(box,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,handle+QPoint(30,35))
     resized=store.highlights(main['file_id'])[0]['appearance']; assert resized['rect'][3]-resized['rect'][1]>moved['rect'][3]-moved['rect'][1]
-    spin=panel.note_font; option=QStyleOptionSpinBox(); spin.initStyleOption(option)
-    up=spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox,option,QStyle.SubControl.SC_SpinBoxUp,spin)
-    down=spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox,option,QStyle.SubControl.SC_SpinBoxDown,spin)
-    assert up.width()>=20 and up.height()>=14 and not up.intersects(down)
+    spin=panel.note_font; up=panel.note_font_plus.rect(); down=panel.note_font_minus.rect()
+    assert panel.note_font_plus.text()=='＋' and panel.note_font_minus.text()=='−'
+    assert all(w.height()==30 for w in [panel.color,panel.note,panel.highlight_button,panel.note_font_group,panel.note_color,panel.marks_button])
+    option=QStyleOptionSpinBox(); spin.initStyleOption(option)
+    field=spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox,option,QStyle.SubControl.SC_SpinBoxEditField,spin)
+    assert spin.fontMetrics().horizontalAdvance(spin.text())<=field.width(),'字号文字必须完整显示'
     for position in [up.center(),up.topLeft()+QPoint(3,3),up.bottomRight()-QPoint(3,3)]:
-        before=spin.value(); QTest.mouseClick(spin,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,position)
+        before=spin.value(); QTest.mouseClick(panel.note_font_plus,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,position)
         assert spin.value()==before+1 and store.highlights(main['file_id'])[0]['appearance']['font_size']==before+1
-    before=spin.value(); QTest.mouseClick(spin,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,down.center())
+    before=spin.value(); QTest.mouseClick(panel.note_font_minus,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,down.center())
     assert spin.value()==before-1 and store.highlights(main['file_id'])[0]['appearance']['font_size']==before-1
     panel.note_font.setValue(16); panel.change_note_font(color='#cc2233')
     appearance=store.highlights(main['file_id'])[0]['appearance']; assert appearance['font_size']==16 and appearance['font_color']=='#cc2233'

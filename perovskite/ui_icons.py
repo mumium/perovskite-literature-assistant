@@ -6,7 +6,7 @@ from PySide6.QtSvg import QSvgRenderer
 PATHS={
  'highlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h18m-9-17 7 7"/>',
  'unhighlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h9m0-17 7 7"/><path d="m17 18 5 5m0-5-5 5" stroke="#c53939" stroke-width="2.3"/>',
- 'font_color':'<path d="m5 17 7-14 7 14M8 12h8M3 22h18"/>',
+ 'font_color':'<defs><linearGradient id="fontRainbow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f05c64"/><stop offset=".25" stop-color="#edb42e"/><stop offset=".5" stop-color="#32b691"/><stop offset=".75" stop-color="#4e86e9"/><stop offset="1" stop-color="#a953cf"/></linearGradient></defs><path d="M10.3 3h3.4l7 18h-4l-1.5-4.3H8.8L7.3 21h-4L10.3 3Zm1.7 5-2.1 5.8h4.2L12 8Z" fill="url(#fontRainbow)" fill-rule="evenodd" stroke="none"/>',
  'import':'<path d="M5 3h9l5 5v13H5zM14 3v6h5M8 14h8m-4-4v8"/>',
  'folder':'<path d="M3 6h7l2 3h9v11H3zM12 11v6m-3-3h6"/>',
  'attach':'<path d="m9 14 7-7a3 3 0 0 1 4 4l-9 9a5 5 0 0 1-7-7l9-9M7 16l9-9"/>',
@@ -36,5 +36,9 @@ def svg_pixmap(svg,size=32,density=2):
 def icon(name):
     svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#28586c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{PATHS[name]}</svg>'
     result=QIcon()
-    for density in [1,2,3]: result.addPixmap(svg_pixmap(svg,24,density))
+    for density in [1,2,3]:
+        pixmap=svg_pixmap(svg,24,density); result.addPixmap(pixmap)
+        # Keep the requested rainbow A recognizable even before a comment is
+        # selected; the surrounding button still indicates its disabled state.
+        if name=='font_color': result.addPixmap(pixmap,QIcon.Mode.Disabled)
     return result
