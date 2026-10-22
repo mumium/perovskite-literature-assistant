@@ -119,10 +119,10 @@ def test_full_preload_budget_retained_images_no_jump_or_zoom_render(tmp_path,qt)
 
 def test_preload_pause_resume_retains_completed_and_retries_failures(tmp_path,qt,monkeypatch):
     import perovskite.reader as reader
-    original=reader.load_pdf_page; failed=set()
+    original=reader.load_pdf_page; failed=set(); phase={'resumed':False}
     def controlled(path,index,*args,**kwargs):
         time.sleep(.015)
-        if index==6 and index not in failed: failed.add(index); raise ValueError('明确模拟单页渲染失败')
+        if index==12 and phase['resumed'] and index not in failed: failed.add(index); raise ValueError('明确模拟单页渲染失败')
         return original(path,index,*args,**kwargs)
     monkeypatch.setattr(reader,'load_pdf_page',controlled)
     source=pdf(tmp_path/'SYNTHETIC pause 16 pages.pdf',16)
@@ -133,8 +133,8 @@ def test_preload_pause_resume_retains_completed_and_retries_failures(tmp_path,qt
         view.loadingChanged.connect(pause); panel.open_file(a['file_id']); wait(panel,qt)
         assert view.paused and not view.full_ready and 3<=len(view.cache)<16
         complete={k[1]:v[0]['image'].cacheKey() for k,v in view.cache.items()}
-        view.loadingChanged.disconnect(pause); panel.toggle_preload(); wait(panel,qt)
-        assert view.failed_pages=={6} and not view.full_ready and panel.preload_button.text()=='重试预载'
+        view.loadingChanged.disconnect(pause); phase['resumed']=True; panel.toggle_preload(); wait(panel,qt)
+        assert view.failed_pages=={12} and not view.full_ready and panel.preload_button.text()=='重试预载'
         panel.toggle_preload(); wait(panel,qt)
         assert view.full_ready and view.render_count==16 and not view.failed_pages
         assert all(view.cached(i,100)['image'].cacheKey()==key for i,key in complete.items())

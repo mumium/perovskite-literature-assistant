@@ -33,7 +33,7 @@ def main():
         from perovskite.selftest import run_selftest
         report = run_selftest(args.smoke_test)
         args.data = report["data_dir"]
-    from perovskite.startup import StartupMemory
+    from perovskite.startup import StartupMemory,library_in_folder
     memory=StartupMemory(Path(args.smoke_test)/"启动位置记录",Path(args.smoke_test)/"启动位置备用记录") if args.smoke_test else StartupMemory()
     directory = args.data if args.smoke_test else memory.choose_directory(QFileDialog.getExistingDirectory,args.data)
     if not directory:
@@ -46,7 +46,7 @@ def main():
         except Exception as exc:
             QMessageBox.critical(None, "无法打开数据目录", str(exc))
             if args.data or args.smoke_test: return 1
-            directory=QFileDialog.getExistingDirectory(None,"请选择其他数据目录（原数据不会删除）",str(Path(directory).parent))
+            directory=library_in_folder(QFileDialog.getExistingDirectory(None,"请选择其他存放位置或已有库（原数据不会删除）",str(Path(directory).parent)))
             if not directory: return 0
     def remember_directory(current):
         try: memory.remember(current.store.root)
@@ -107,11 +107,22 @@ def main():
                 start = next(i for i,w in enumerate(words) if w["text"] == "Control")
                 window.reader.canvas.select_words(start,start+8)
                 window.reader.note.setText("便携高亮验收：准备复现工艺")
-                window.reader.save_selection()
-                window.reader.zoom.setValue(200)
+                from PySide6.QtCore import Qt,QEvent
+                from PySide6.QtGui import QKeyEvent
+                window.reader.canvas.setFocus()
+                application.sendEvent(window.reader.canvas,QKeyEvent(QEvent.Type.KeyPress,Qt.Key.Key_H,Qt.KeyboardModifier.ShiftModifier,'H'))
+                reader_phase['highlight_shortcut']=len(window.store.highlights(window.reader.file_id))==1
+                window.reader.note_font.setValue(14); window.reader.change_note_font(color='#aa3322')
+                window.reader.zoom.setValue(400)
                 reader_phase["step"] = 1
                 QTimer.singleShot(500,finish); return
             if reader_phase["step"] == 1:
+                view=window.reader.pdf_view
+                reader_phase['vector_detail']=bool(window.reader.canvas.hd) and view.hd_render_count>0 and all(p.data.get('display_list') for p in view.pages)
+                reader_phase['yellow_highlight_icon']='取消高亮' in window.reader.highlight_button.toolTip()
+                slider=window.reader.zoom_slider; slider.setSliderDown(True); slider.setSliderPosition(2)
+                reader_phase['zoom_center_snap']=slider.value()==0 and window.reader.zoom.value()==100
+                slider.setSliderDown(False); window.reader.zoom.setValue(200)
                 fid = next(f["file_id"] for f in window.store.files(report["article_id"]) if f["role"] == "main")
                 window.reader.open_file(fid)
                 reader_phase["step"] = 2
@@ -141,6 +152,8 @@ def main():
                 window.reader.open_file(fid)
                 reader_phase['step']=6; QTimer.singleShot(400,finish); return
             window.grab().save(str(root / "GUI原文.png"))
+            marks=window.store.highlights(window.reader.file_id)
+            reader_phase['page_note_persisted']=bool(marks and marks[0]['appearance'].get('font_size')==14 and marks[0]['appearance'].get('font_color')=='#aa3322' and marks[0]['mark_id'] in window.reader.canvas.note_boxes)
             good = window.preview_image.pixmap() is not None and not window.preview_image.pixmap().isNull()
             import PySide6, fitz
             from perovskite.extract import digest
@@ -153,6 +166,7 @@ def main():
             native_back=save_annotated_pdf(window.store,fid,root/"明确标注的测试文档"/"测试 正文 synthetic.pdf",True)
             with fitz.open(root/"含标准批注PDF.pdf") as annotated:
                 native_saved=any(a.info.get("content")=="便携高亮验收：准备复现工艺" for p in annotated for a in (p.annots() or []))
+                reader_phase['native_note_box']=any(a.type[0]==fitz.PDF_ANNOT_FREE_TEXT for p in annotated for a in (p.annots() or []))
                 annotated[0].get_pixmap().save(root/"原生PDF批注渲染.png")
             native_backup=bool(native_back["backup"]) and digest(native_back["backup"])==window.store.file(fid)["sha256"]
             unchanged=digest(window.store.path(fid))==window.store.file(fid)["sha256"]
@@ -170,8 +184,12 @@ def main():
             automatic_original=reader_phase.get("automatic_original",False)
             def unexpected_picker(*args): raise AssertionError("已记忆的目录不应再次弹出选择窗口")
             startup_memory=StartupMemory(memory.app_directory,memory.fallback_directory).choose_directory(unexpected_picker)==str(window.store.root)
-            compact_layout=window.width()==1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
-            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories']}
+            parent=root/'新库父文件夹'; parent.mkdir(exist_ok=True); child=library_in_folder(parent)
+            from perovskite.store import Store
+            with Store(child): pass
+            reader_phase['startup_child_folder']=not (parent/'library.sqlite').exists() and Path(child).parent==parent.resolve() and (Path(child)/'library.sqlite').exists()
+            compact_layout=min(1200,application.primaryScreen().availableGeometry().width()-32)<=window.width()<=1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder']}
             atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
             application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(reader_checks.values()) else 1)

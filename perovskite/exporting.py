@@ -25,7 +25,7 @@ def markdown(store, article_id):
         for mark in store.highlights(file["file_id"]):
             anchor = mark["anchors"][0]
             location = f"实际第{anchor['page_index']+1}页" if mark["kind"] == "pdf" else anchor["loc_id"]
-            text.append(f"- {file['name']} | {location} | {mark['color']} | {mark['mark_id']}\n  > {mark['text']}\n  批注：{mark['note'] or '未记录'}")
+            text.append(f"- {file['name']} | {location} | {mark['color']} | {mark['mark_id']}\n  > {mark['text']}\n  批注：{mark['note'] or '未记录'}\n  页内批注样式：{dumps(mark.get('appearance',{}))}")
     return "\n".join(text)
 
 def excel_export(store, ids, target, cancel=lambda: False):
@@ -41,7 +41,7 @@ def excel_export(store, ids, target, cancel=lambda: False):
         "证据": ["article_id", "分析段", "evidence_id", "file_id", "位置ID", "图表", "印刷页码", "原文片段", "引用匹配", "人工核验"],
         "阅读卡": ["article_id", "项目", "类别", "内容", "证据ID", "人工核验"],
         "修订历史": ["history_id", "article_id", "范围", "旧值JSON", "新值JSON", "来源", "UTC时间"],
-        "高亮批注": ["article_id", "file_id", "mark_id", "文件名", "文件SHA256", "类型", "原文", "位置JSON", "颜色", "批注", "创建UTC", "修改UTC"],
+        "高亮批注": ["article_id", "file_id", "mark_id", "文件名", "文件SHA256", "类型", "原文", "位置JSON", "颜色", "批注", "创建UTC", "修改UTC", "页内批注样式JSON"],
         "手动分类": ["article_id", "category_id", "类别", "归类UTC"],
     }
     sheets = {k: book.create_sheet(k) for k in headers}
@@ -73,7 +73,7 @@ def excel_export(store, ids, target, cancel=lambda: False):
         for f in store.files(aid):
             append("附件", [aid] + [f[k] for k in ["file_id", "sha256", "name", "role", "path", "status", "reason", "pairing"]])
             for mark in store.highlights(f["file_id"]):
-                append("高亮批注", [aid,f["file_id"],mark["mark_id"],f["name"],mark["file_sha256"],mark["kind"],mark["text"],dumps(mark["anchors"]),mark["color"],mark["note"],mark["created"],mark["modified"]])
+                append("高亮批注", [aid,f["file_id"],mark["mark_id"],f["name"],mark["file_sha256"],mark["kind"],mark["text"],dumps(mark["anchors"]),mark["color"],mark["note"],mark["created"],mark["modified"],dumps(mark.get('appearance',{}))])
         for name in ["story", "process"]:
             section = store.section(aid, name)
             if not section:

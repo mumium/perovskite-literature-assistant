@@ -4,6 +4,9 @@ from PySide6.QtGui import QIcon,QImage,QPainter,QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 PATHS={
+ 'highlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h18m-9-17 7 7"/>',
+ 'unhighlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h9m0-17 7 7"/><path d="m17 18 5 5m0-5-5 5" stroke="#c53939" stroke-width="2.3"/>',
+ 'font_color':'<path d="m5 17 7-14 7 14M8 12h8M3 22h18"/>',
  'import':'<path d="M5 3h9l5 5v13H5zM14 3v6h5M8 14h8m-4-4v8"/>',
  'folder':'<path d="M3 6h7l2 3h9v11H3zM12 11v6m-3-3h6"/>',
  'attach':'<path d="m9 14 7-7a3 3 0 0 1 4 4l-9 9a5 5 0 0 1-7-7l9-9M7 16l9-9"/>',

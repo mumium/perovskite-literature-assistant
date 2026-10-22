@@ -68,8 +68,8 @@ def test_small_window_auto_read_switch_and_clear(tmp_path):
     wait_reader(window,app)
     assert window.reader.file_id==si['file_id'] and window.tabs.currentWidget() is window.story_tab
     window.reader.file_picker.setCurrentIndex(window.reader.file_picker.findData(main['file_id'])); wait_reader(window,app)
-    assert window.windowTitle()==window.banner.text()=='钙钛矿文献助手'
-    assert window.width()==1280 and window.height()==720
+    assert window.windowTitle()=='钙钛矿文献助手 · MK Design' and window.banner.text()=='钙钛矿文献助手' and window.signature.text()=='MK Design'
+    assert min(1200,app.primaryScreen().availableGeometry().width()-32)<=window.width()<=1280 and window.height()==720
     assert window.reader.scroll.viewport().height()>=400
     assert window.table.viewport().height()//window.table.rowHeight(0)>=15
     assert window.table.rowHeight(0)==32
@@ -134,6 +134,7 @@ def test_associate_uses_disk_file_picker_without_article_list(tmp_path,monkeypat
     requested=[]; window.directoryRequested.connect(requested.append)
     monkeypatch.setattr(QFileDialog,'getExistingDirectory',lambda *args:str(tmp_path/'另一个文献库'))
     window.change_data_directory()
-    assert requested==[str(tmp_path/'另一个文献库')]
+    from perovskite.startup import DATA_FOLDER
+    assert requested==[str(tmp_path/'另一个文献库'/DATA_FOLDER)]
     assert window.store.root==root.resolve()
     window.close(); app.processEvents()

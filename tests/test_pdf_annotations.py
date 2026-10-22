@@ -56,7 +56,7 @@ def test_write_back_backup_update_and_remove_only_own_marks(annotated_library):
     store.save_highlight(fid,"pdf",stored["text"],stored["anchors"],"pink","更新后的批注",mark)
     second=save_annotated_pdf(store,fid,files["main"],write_back=True)
     anns=native_annotations(files["main"])
-    assert len(anns)==2 and sum(a["content"]=="更新后的批注" for a in anns)==1
+    assert len(anns)==3 and sum(a["content"]=="更新后的批注" for a in anns)==2
     assert second["backup"]!=first["backup"]
     store.delete_highlight(mark,fid)
     save_annotated_pdf(store,fid,files["main"],write_back=True)
@@ -110,5 +110,5 @@ def test_export_background_worker(annotated_library,tmp_path,monkeypatch):
         app.processEvents(); time.sleep(.01)
     assert not panel.export_worker and not errors
     assert output.exists() and "PDF已保存" in panel.status.text()
-    assert len(native_annotations(output))==2
+    assert len(native_annotations(output))==3
     panel.close()

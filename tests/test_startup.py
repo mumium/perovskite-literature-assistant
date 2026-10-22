@@ -2,7 +2,7 @@ import json
 import shutil
 from pathlib import Path
 import pytest
-from perovskite.startup import StartupMemory,STARTUP_FILE
+from perovskite.startup import StartupMemory,STARTUP_FILE,DATA_FOLDER
 from perovskite.store import Store
 
 def library(path):
@@ -41,7 +41,7 @@ def test_missing_or_malformed_locator_prompts_without_recreating_old_library(tmp
     assert '不可用' in calls[0][1] and not data.exists()
     (tmp_path/'程序'/STARTUP_FILE).write_text('{bad json',encoding='utf-8')
     assert memory.last_directory() is None
-    assert memory.choose_directory(lambda *args:'新选择目录')=='新选择目录'
+    assert memory.choose_directory(lambda *args:str(tmp_path/'新选择目录'))==str(tmp_path/'新选择目录'/DATA_FOLDER)
     with pytest.raises(ValueError,match='成功打开'): memory.remember(tmp_path/'未建文献库')
 
 def test_readonly_program_uses_newer_local_fallback(tmp_path,monkeypatch):
@@ -63,7 +63,7 @@ def test_readonly_program_uses_newer_local_fallback(tmp_path,monkeypatch):
         if path==second/'library.sqlite': raise PermissionError('drive unavailable')
         return is_file(path)
     monkeypatch.setattr(Path,'is_file',inaccessible)
-    assert memory.choose_directory(lambda *args:'重新选的库')=='重新选的库'
+    assert memory.choose_directory(lambda *args:str(tmp_path/'重新选的库'))==str(tmp_path/'重新选的库'/DATA_FOLDER)
 
 def test_failed_memory_writes_leave_library_usable(tmp_path,monkeypatch):
     import perovskite.startup as startup

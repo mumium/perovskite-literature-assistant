@@ -2,7 +2,7 @@
 import math
 import threading
 from collections import OrderedDict
-from PySide6.QtCore import Qt,QThread,Signal,QTimer
+from PySide6.QtCore import Qt,QThread,Signal,QTimer,QPoint
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QScrollArea
 from .extract import PDF_LOCK,digest
@@ -30,6 +30,16 @@ def pdf_search(path,query,cancel):
             hits=[{'rect':list(r),'display_rect':list(r*page.rotation_matrix)} for r in page.search_for(query)]
             if hits: result[index]=hits
     return result
+
+def render_detail(display_list,rect,scale,cancel):
+    """Replay retained vector commands only for the visible page region."""
+    import fitz
+    if cancel(): raise InterruptedError()
+    with PDF_LOCK:
+        pix=display_list.get_pixmap(matrix=fitz.Matrix(scale,scale),colorspace=fitz.csRGB,alpha=False,clip=fitz.Rect(rect))
+        image=QImage(pix.samples,pix.width,pix.height,pix.stride,QImage.Format.Format_RGB888).copy()
+    if cancel(): raise InterruptedError()
+    return {'image':image,'rect':[pix.x/scale,pix.y/scale,(pix.x+pix.width)/scale,(pix.y+pix.height)/scale]}
 
 class PdfJob(QThread):
     ready=Signal(object)
@@ -93,6 +103,8 @@ class ContinuousPdfView(QWidget):
     status=Signal(str)
     error=Signal(str)
     loadingChanged=Signal(int,int,str)
+    noteStyleChanged=Signal(str,object)
+    noteEditRequested=Signal(str)
     def __init__(self,canvas_factory,parent=None):
         super().__init__(parent)
         self.factory=canvas_factory; self.pages=[]; self.info=None; self.file_id=None
@@ -100,8 +112,10 @@ class ContinuousPdfView(QWidget):
         self.cache=OrderedDict(); self.cache_bytes=0; self.cache_limit=512*1024**2
         self.zoom=100; self.fit=False; self.marks=[]; self.query=''; self.hits={}; self.evidence=None
         self.render_count=0; self.failed_pages=set(); self._layout_changing=False
+        self.hd_cache=OrderedDict(); self.hd_bytes=0; self.hd_limit=64*1024**2; self.hd_request=None; self.hd_generation=0; self.hd_render_count=0
         self.stopped=True; self.preload_request=None; self.full_ready=False; self.paused=False; self.loading=False; self.load_error=None
         self.selection_span=None
+        self.notes_enabled=True
         layout=QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         self.scroll=QScrollArea(); self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
         self.scroll.setStyleSheet('QScrollArea{background:#e1e7ed;border:1px solid #ccd5dc}')
@@ -109,16 +123,18 @@ class ContinuousPdfView(QWidget):
         self.page_layout=QVBoxLayout(self.document); self.page_layout.setContentsMargins(8,8,8,8); self.page_layout.setSpacing(12)
         self.scroll.setWidget(self.document); layout.addWidget(self.scroll)
         self.scroll.verticalScrollBar().valueChanged.connect(self.scrolled)
+        self.scroll.horizontalScrollBar().valueChanged.connect(lambda _:self.timer.start(90) if not self.stopped else None)
         self.timer=QTimer(self); self.timer.setSingleShot(True); self.timer.timeout.connect(self.request_visible)
         self.empty=self.factory(); self.empty.setFixedSize(1,1)
 
     @property
     def canvas(self): return self.active_canvas or self.empty
     @property
-    def pending(self): return self.jobs or self.preload_request or self.timer.isActive()
+    def pending(self): return self.jobs or self.preload_request or self.hd_request or self.timer.isActive()
 
     def stop(self):
         self.stopped=True; self.serial+=1; self.jobs.clear(); self.timer.stop(); self.preload_request=None; self.loading=False
+        self.hd_request=None; self.hd_generation+=1
         if self.worker: self.worker.cancelled.set()
 
     def clear(self):
@@ -126,11 +142,13 @@ class ContinuousPdfView(QWidget):
         for page in self.pages:
             self.page_layout.removeWidget(page); page.release_bitmap(True); page.deleteLater()
         self.pages=[]; self.cache.clear(); self.cache_bytes=0; self.full_ready=False
+        self.hd_cache.clear(); self.hd_bytes=0
         self.document.setFixedSize(1,1); self.loadingChanged.emit(0,0,'empty')
 
     def open(self,path,file_id,expected_hash,page_index,zoom,fit,marks,evidence=None):
         self.clear(); self.path=path; self.expected_hash=expected_hash; self.file_id=file_id; self.zoom=zoom; self.fit=fit
         self.stopped=False; self.paused=False; self.load_error=None; self.render_count=0
+        self.hd_render_count=0
         self.current=page_index; self.marks=marks; self.evidence=evidence; self.hits={}; self.query=''; self.failed_pages=set()
         self.quality=max(100,min(400,math.ceil(zoom/100)*100))
         self.preload_request=(None,None); self.start_job()
@@ -149,10 +167,13 @@ class ContinuousPdfView(QWidget):
                     for i,geometry in enumerate(result['pages']):
                         canvas=self.factory(); canvas.geometry_info=geometry; canvas.page_index=i
                         canvas.document_payload=self.selected_payload
+                        canvas.notes_editable=self.notes_enabled
                         canvas.selectionChanged.connect(lambda text,c=canvas:self.selected(c,text))
                         canvas.highlightRequested.connect(self.highlightRequested.emit); canvas.zoomRequested.connect(self.zoomRequested.emit)
                         canvas.markSelected.connect(self.markSelected.emit); canvas.deleteRequested.connect(self.deleteRequested.emit)
                         canvas.dragRequested.connect(lambda start,point,c=canvas:self.drag_across(c,start,point))
+                        canvas.horizontalRequested.connect(self.horizontal_scroll)
+                        canvas.noteStyleChanged.connect(self.noteStyleChanged.emit); canvas.noteEditRequested.connect(self.noteEditRequested.emit)
                         canvas.setText(f'实际页 {i+1} · 等待全文预加载')
                         self.page_layout.addWidget(canvas,0,Qt.AlignmentFlag.AlignHCenter); self.pages.append(canvas); canvas.show()
                     self.current=max(0,min(self.current,len(self.pages)-1)); self.set_zoom(self.zoom,self.fit,False); self.navigate(self.current)
@@ -181,6 +202,26 @@ class ContinuousPdfView(QWidget):
                     self.navigate(target); self.status.emit(f'找到 {sum(len(v) for v in result.values())} 个文字区域；已跳转到实际页 {target+1}')
                 else: self.status.emit('全文未匹配，请缩短句子或直接拖选字符')
             worker.ready.connect(ready)
+        elif self.hd_request:
+            targets=self.hd_request; self.hd_request=None; generation=self.hd_generation
+            stat=self.info['stat']; path=self.path
+            def detail(cancel):
+                current=path.stat()
+                if (current.st_size,current.st_mtime_ns)!=stat: raise ValueError('附件在阅读期间被修改，请重新导入')
+                return [(key,index,render_detail(dl,rect,scale,cancel)) for key,index,dl,rect,scale in targets]
+            worker=PdfJob(detail); self.worker=worker
+            def detail_ready(results):
+                if serial!=self.serial or generation!=self.hd_generation: return
+                for key,index,data in results:
+                    if key in self.hd_cache: self.hd_bytes-=self.hd_cache.pop(key)[1]
+                    size=data['image'].sizeInBytes(); self.hd_cache[key]=(data,size); self.hd_bytes+=size; self.hd_render_count+=1
+                    self.pages[index].hd=data; self.pages[index].update()
+                while self.hd_bytes>self.hd_limit and self.hd_cache:
+                    key,(data,size)=self.hd_cache.popitem(last=False); self.hd_bytes-=size
+                    for page in self.pages:
+                        if page.hd is data: page.hd=None; page.update()
+                self.report_status()
+            worker.ready.connect(detail_ready)
         else: return
         def failed(message):
             if serial!=self.serial: return
@@ -191,6 +232,7 @@ class ContinuousPdfView(QWidget):
                 self.loading=False; self.full_ready=bool(self.pages) and all(p.data for p in self.pages) and not self.load_error
                 state='ready' if self.full_ready else 'paused' if self.paused else 'failed'
                 self.loadingChanged.emit(len(self.cache),len(self.pages),state); self.report_status()
+                if self.full_ready: self.timer.start(30)
             self.start_job()
         worker.failed.connect(failed); worker.finished.connect(finish); worker.start()
 
@@ -223,13 +265,17 @@ class ContinuousPdfView(QWidget):
         if preserve and self.pages:
             self.scroll.verticalScrollBar().setValue(round(self.pages[anchor].y()+fraction*self.pages[anchor].height()))
         self._layout_changing=False
+        self.hd_generation+=1; self.hd_request=None; self.timer.start(120)
         self.report_status()
 
     def navigate(self,index):
         if not self.pages: return
         index=max(0,min(index,len(self.pages)-1)); self.current=index; self.active_canvas=self.pages[index]
         self.scroll.verticalScrollBar().setValue(max(0,self.pages[index].y()-8))
-        self.currentChanged.emit(index); self.report_status()
+        self.currentChanged.emit(index); self.timer.start(70); self.report_status()
+
+    def horizontal_scroll(self,delta):
+        bar=self.scroll.horizontalScrollBar(); bar.setValue(bar.value()-delta)
 
     def selected(self,canvas,text):
         self.selection_span=None
@@ -267,6 +313,7 @@ class ContinuousPdfView(QWidget):
 
     def scrolled(self,*args):
         if self._layout_changing or not self.pages: return
+        self.timer.start(90)
         y=self.scroll.verticalScrollBar().value()+min(60,self.scroll.viewport().height()//5)
         index=next((i for i,p in enumerate(self.pages) if p.y()+p.height()>y),len(self.pages)-1)
         if index==self.current: return
@@ -283,6 +330,26 @@ class ContinuousPdfView(QWidget):
         key=min(candidates,key=lambda k:k[2]); value=self.cache[key][0]; self.cache.move_to_end(key); return value
 
     def request_visible(self):
+        if self.stopped or not self.full_ready: return
+        targets=[]
+        for index in self.visible_indices():
+            page=self.pages[index]; data=page.data; scale=self.scale_for(page.geometry_info)
+            density=max(1.25,self.devicePixelRatioF()); effective=scale*density
+            if data['image'].width()/data['width']>=effective-.01: continue
+            local=page.mapFrom(self.scroll.viewport(),QPoint(0,0))
+            left=max(0,math.floor((local.x()-64)/scale/32)*32); top=max(0,math.floor((local.y()-64)/scale/32)*32)
+            right=min(data['width'],math.ceil((local.x()+self.scroll.viewport().width()+64)/scale/32)*32)
+            bottom=min(data['height'],math.ceil((local.y()+self.scroll.viewport().height()+64)/scale/32)*32)
+            if right<=left or bottom<=top: continue
+            rect=[left,top,right,bottom]
+            # A viewport patch is bounded separately from whole-document previews.
+            effective=min(effective,math.sqrt(16_000_000/((right-left)*(bottom-top))))
+            key=(self.file_id,index,round(effective,4),tuple(rect))
+            if key in self.hd_cache:
+                patch=self.hd_cache[key][0]; self.hd_cache.move_to_end(key); page.hd=patch; page.update()
+            else: targets.append((key,index,data['display_list'],rect,effective))
+        self.hd_request=targets or None
+        self.start_job()
         self.report_status()
 
     def show_page(self,index,data):
@@ -298,7 +365,13 @@ class ContinuousPdfView(QWidget):
 
     def set_marks(self,marks):
         self.marks=marks
-        for page in self.pages: page.marks=marks; page.update()
+        for page in self.pages: page.marks=marks; page.sync_notes(); page.update()
+
+    def set_notes_enabled(self,enabled):
+        self.notes_enabled=enabled
+        for page in self.pages:
+            page.notes_editable=enabled
+            for box in page.note_boxes.values(): box.setEnabled(enabled)
 
     def find(self,query,evidence=False):
         self.query=query
@@ -319,4 +392,5 @@ class ContinuousPdfView(QWidget):
         if self.failed_pages: text+=f' · {len(self.failed_pages)}页失败，可重试'
         if self.info and self.info.get('reduced'): text+=' · 已按全文内存预算优化分辨率'
         if self.load_error: text+=' · '+self.load_error
+        if page.hd: text+=' · 矢量高清区域'
         self.status.emit(text)

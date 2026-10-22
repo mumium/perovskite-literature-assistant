@@ -65,7 +65,7 @@ class Window(QMainWindow):
     directoryRequested=Signal(str)
     def __init__(self, data_dir):
         super().__init__()
-        self.setWindowTitle("钙钛矿文献助手")
+        self.setWindowTitle("钙钛矿文献助手 · MK Design")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.ico")))
         available=QApplication.primaryScreen().availableGeometry()
         self.resize(min(1680,available.width()-32),min(980,available.height()-48))
@@ -110,6 +110,8 @@ class Window(QMainWindow):
         logo.setPixmap(svg_pixmap((Path(__file__).resolve().parent.parent/'assets/logo-book-octahedron.svg').read_bytes(),32,max(2,self.devicePixelRatioF())))
         brand.addWidget(logo)
         brand.addWidget(banner)
+        self.signature=QLabel('MK Design'); self.signature.setStyleSheet('font-size:12px;font-weight:600;color:#647d8c;padding:2px 6px')
+        brand.addWidget(self.signature)
         self.path_label = QLabel("数据目录：" + str(self.store.root) + "   ｜请勿同时编辑同一数据目录")
         self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
         self.path_label.setToolTip(self.path_label.text())
@@ -152,7 +154,7 @@ class Window(QMainWindow):
         self.center_panel = center
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(3); center.setMinimumWidth(240)
+        cl.setSpacing(2); center.setMinimumWidth(240)
         self.search = QLineEdit()
         self.search.setPlaceholderText("全文搜索：正文、SI、阅读卡、工艺、人工笔记")
         self.search.returnPressed.connect(self.refresh)
@@ -1063,6 +1065,8 @@ class Window(QMainWindow):
         if self.worker or self.reader.export_worker:
             self.error("请等待当前任务完成后切换数据目录"); return
         path=QFileDialog.getExistingDirectory(self,"切换数据目录（不会移动或删除当前数据）",str(self.store.root.parent))
+        from .startup import library_in_folder
+        path=library_in_folder(path)
         if path and Path(path).resolve()!=self.store.root:
             self.directoryRequested.emit(path)
 
@@ -1096,10 +1100,12 @@ class Window(QMainWindow):
 左侧手动分类的+按钮可创建类别；将清单文献拖入类别，Ctrl/Shift可多选。一篇文献可归入多个类别。右键可移出、改名或删除类别，文献与附件保留。
 自定义标签可新增、重命名、删除并勾选应用到当前文献；左侧标签上右键也可打开管理。
 文献信息、核心故事、工艺与性能字段可直接双击编辑。单行Enter保存，多行Ctrl+Enter保存，Esc取消，离开编辑框也保存；修订历史保留。编辑后的科学结论需重新核验。
-原文打开后后台预加载全部页面，显示进度并可暂停、继续。加载完成后滚动、跳页、缩放均复用图像。全文图像预算512MiB，超长文档会明确提示分辨率调整。页码下箭头向后、上箭头向前。支持单字母选择，查找句子、高亮与删除高亮常驻。
+原文打开后后台预解析所有页的绘制指令并预载预览，显示进度并可暂停、继续。放大立即显示预览，随后从绘制指令补清晰画面。Shift+滚轮左右滚动，Ctrl+滚轮缩放。滑条中点100%轻微吸附，百分比箭头可1%微调。
+黄色荧光笔图标或Shift+H高亮；选中已有高亮后图标变为取消高亮，再点或按Shift+H取消；Delete仍可删除，Ctrl+C复制。输入框内正常输入。
+输入批注后高亮，会在PDF页内显示批注框。拖动移动、右下角缩放、双击编辑；选中后用字号和字体颜色按钮调整，也可右键设置。位置与样式自动保存到数据目录。
 点击原文高亮或列表记录后按Delete删除；批注列双击直接编辑，位置/原文列双击跳转。删除键在文字输入框内正常删字。
 切换左侧文献保留当前页签。详情列包含通讯作者，完整名单可悬停查看。
-默认离线，不内置OCR；DOC暂不解析。PDF另存/写回批注在更多阅读操作中。所有数据在所选目录，附件可随目录搬移。
+默认离线，不内置OCR；DOC暂不解析。“保存批注”可另存或写回PDF，包含高亮和页内文字批注。首次新库在所选文件夹内自动建立“钙钛矿文献助手数据”，旧库直接打开。附件可随整个数据目录搬移。
 更详细说明见随附README。"""
         TextDialog("钙钛矿文献助手 · 使用说明",text,self).exec()
 

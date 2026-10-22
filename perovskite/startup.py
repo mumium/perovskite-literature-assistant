@@ -7,6 +7,20 @@ import time
 from pathlib import Path
 
 STARTUP_FILE="startup-location.json"
+DATA_FOLDER='钙钛矿文献助手数据'
+
+def library_in_folder(selected):
+    """Open existing libraries as-is; new libraries get a dedicated child folder."""
+    if not selected: return ''
+    path=Path(selected).resolve()
+    if (path/'library.sqlite').is_file(): return str(path)
+    child=path/DATA_FOLDER
+    if child.exists() and not (child/'library.sqlite').is_file():
+        # A pre-existing unrelated folder must not be adopted or overwritten.
+        index=2
+        while (path/f'{DATA_FOLDER} ({index})').exists(): index+=1
+        child=path/f'{DATA_FOLDER} ({index})'
+    return str(child)
 
 class StartupMemory:
     def __init__(self,app_directory=None,fallback_directory=None):
@@ -41,9 +55,9 @@ class StartupMemory:
             if remembered and (remembered/"library.sqlite").is_file(): return str(remembered)
         except OSError:
             pass
-        title="钙钛矿文献助手：选择或新建数据目录（不要同时编辑）"
+        title="选择存放位置：自动建立“钙钛矿文献助手数据”子文件夹；也可选择已有库"
         if remembered: title="上次数据目录不可用，请重新选择（原数据不会删除）"
-        return picker(None,title,str(remembered.parent) if remembered else "")
+        return library_in_folder(picker(None,title,str(remembered.parent) if remembered else ""))
 
     def remember(self,directory):
         directory=Path(directory).resolve()

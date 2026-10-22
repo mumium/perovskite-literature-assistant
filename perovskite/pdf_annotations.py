@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import html
 from collections import defaultdict
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def save_annotated_pdf(store,file_id,target,write_back=False,cancel=lambda:False
                 for annotation in list(page.annots() or []):
                     if annotation.info.get("subject","").startswith(prefix):
                         page.delete_annot(annotation)
-            count=0
+            count=0; note_count=0
             for mark in marks:
                 by_page=defaultdict(list)
                 for anchor in mark["anchors"]:
@@ -74,15 +75,35 @@ def save_annotated_pdf(store,file_id,target,write_back=False,cancel=lambda:False
                     annotation.set_info(title="钙钛矿文献助手",subject=prefix+mark["mark_id"],content=mark["note"] or mark["text"])
                     annotation.update()
                     count+=1
+                if mark['note']:
+                    from .note_style import default_note_style,validate_note_style
+                    first=mark['anchors'][0]; page=doc[first['page_index']]
+                    style=mark.get('appearance') or default_note_style(mark,page.rect.width,page.rect.height,list(fitz.Rect(first['rect'])*page.rotation_matrix))
+                    validate_note_style(style); page=doc[style['page_index']]
+                    display_rect=fitz.Rect(style['rect']) & page.rect
+                    rect=display_rect*page.derotation_matrix
+                    if rect.is_empty: raise ValueError('页内批注超出PDF页面，未写入')
+                    # CJK fallback fonts are bundled with MuPDF; no Office or
+                    # separately installed font/runtime is required on the reader.
+                    content='<div>'+html.escape(mark['note']).replace('\n','<br>')+'</div>'
+                    css=f"font-family: sans-serif; font-size: {style['font_size']}pt; color: {style['font_color']};"
+                    note=page.add_freetext_annot(rect,content,richtext=True,style=css,fill_color=(1,.99,.89),border_color=(.8,.77,.6),border_width=.6,rotate=page.rotation)
+                    note.set_info(title='钙钛矿文献助手',subject=prefix+mark['mark_id']+':note',content=mark['note'])
+                    # add_freetext_annot has already generated the rich-text
+                    # appearance. Updating it again from plain /Contents would
+                    # discard explicit HTML line breaks in some MuPDF versions.
+                    note_count+=1
             doc.save(stage,garbage=3,deflate=True)
         # Reopen the staged PDF and verify every native annotation and comment.
         with PDF_LOCK,fitz.open(stage) as check:
             saved=[a.info for p in check for a in (p.annots() or []) if a.info.get("subject","").startswith(prefix)]
-            if len(saved)!=count:
+            if len(saved)!=count+note_count:
                 raise ValueError("PDF批注写入校验失败，目标未覆盖")
             for mark in marks:
                 if not any(a.get("subject")==prefix+mark["mark_id"] and a.get("content")== (mark["note"] or mark["text"]) for a in saved):
                     raise ValueError("PDF批注内容校验失败，目标未覆盖")
+                if mark['note'] and not any(a.get('subject')==prefix+mark['mark_id']+':note' and a.get('content')==mark['note'] for a in saved):
+                    raise ValueError('PDF页内文字批注校验失败，目标未覆盖')
         output_sha=digest(stage,cancel)
         if cancel(): raise InterruptedError("PDF保存已取消，原文件未改写")
         if current_sha:
@@ -94,7 +115,7 @@ def save_annotated_pdf(store,file_id,target,write_back=False,cancel=lambda:False
             if digest(backup,cancel)!=current_sha:
                 raise ValueError("原PDF备份校验失败，未覆盖")
         report={"file_id":file_id,"source_sha256":file["sha256"],"output_sha256":output_sha,"target_name":target.name,
-                "annotation_count":count,"mark_ids":[m["mark_id"] for m in marks],"backup_path":backup.relative_to(store.root).as_posix() if backup else None,"created":now(),"status":"prepared"}
+                "annotation_count":count,"note_box_count":note_count,"mark_ids":[m["mark_id"] for m in marks],"backup_path":backup.relative_to(store.root).as_posix() if backup else None,"created":now(),"status":"prepared"}
         record_path=records/(output_sha+".json")
         atomic_json(record_path,report)
         if cancel(): raise InterruptedError("PDF保存已取消，原文件未改写")

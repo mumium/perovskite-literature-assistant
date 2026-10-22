@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from .extract import digest, extract, candidates
 from .schema import META_FIELDS, empty_metadata, TAGS
 
-DB_VERSION = 3
+DB_VERSION = 4
 UNFILED = '__unfiled__'
 
 def uid():
@@ -123,6 +123,18 @@ class Store:
                 PRAGMA user_version=3;
                 COMMIT;
                 ''')
+            except Exception:
+                self.db.rollback(); self.db.close(); raise
+            version=3
+        if version==3:
+            if existing_version==3:
+                folder=self.root/'migrations'; folder.mkdir(exist_ok=True)
+                with closing(sqlite3.connect(folder/f'library-v3-{uid()}.sqlite')) as snapshot: self.db.backup(snapshot)
+            try:
+                with self.db:
+                    if 'appearance' not in [r[1] for r in self.db.execute('PRAGMA table_info(highlights)')]:
+                        self.db.execute("ALTER TABLE highlights ADD COLUMN appearance TEXT NOT NULL DEFAULT '{}'")
+                    self.db.execute('PRAGMA user_version=4')
             except Exception:
                 self.db.rollback(); self.db.close(); raise
         if not (self.root / "config.json").exists():
@@ -471,7 +483,20 @@ class Store:
         rows = self.rows("SELECT * FROM highlights WHERE file_id=? ORDER BY created", (file_id,))
         for row in rows:
             row["anchors"] = json.loads(row["anchors"])
+            row['appearance']=json.loads(row['appearance'])
         return rows
+
+    def save_note_style(self,file_id,mark_id,appearance):
+        from .note_style import validate_note_style
+        validate_note_style(appearance)
+        mark=next((m for m in self.highlights(file_id) if m['mark_id']==mark_id),None)
+        if not mark or mark['kind']!='pdf': raise ValueError('批注不存在或不属于当前PDF')
+        if appearance and appearance['page_index'] not in {a['page_index'] for a in mark['anchors']}: raise ValueError('批注必须位于所关联的原文页面')
+        if appearance==mark['appearance']: return
+        with self.db:
+            self.db.execute('UPDATE highlights SET appearance=?,modified=? WHERE mark_id=? AND file_id=?',(dumps(appearance),now(),mark_id,file_id))
+            article=self.db.execute('SELECT article_id FROM links WHERE file_id=?',(file_id,)).fetchone()
+            if article: self.history(article['article_id'],'note_style',mark['appearance'],appearance,'拖动或调整原文批注')
 
     def save_highlight(self, file_id, kind, text, anchors, color="yellow", note="", mark_id=None):
         file = self.file(file_id)
@@ -510,7 +535,8 @@ class Store:
             old = dict(old)
         mark_id = mark_id or uid()
         with self.db:
-            self.db.execute("INSERT OR REPLACE INTO highlights VALUES(?,?,?,?,?,?,?,?,?,?)", (mark_id, file_id, file["sha256"], kind, text, dumps(anchors), color, note, old["created"] if old else now(), now()))
+            self.db.execute('''INSERT INTO highlights(mark_id,file_id,file_sha256,kind,text,anchors,color,note,created,modified) VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(mark_id) DO UPDATE SET text=excluded.text,anchors=excluded.anchors,color=excluded.color,note=excluded.note,modified=excluded.modified''', (mark_id, file_id, file["sha256"], kind, text, dumps(anchors), color, note, old["created"] if old else now(), now()))
             row = self.db.execute("SELECT article_id FROM links WHERE file_id=?", (file_id,)).fetchone()
             if row:
                 self.history(row["article_id"], "highlights", old, {"mark_id": mark_id, "file_id": file_id, "text": text, "anchors": anchors, "color": color, "note": note}, "人工原文高亮")
