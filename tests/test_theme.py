@@ -72,3 +72,40 @@ def test_dark_dialog_inputs_indicators_spin_and_light_restore(tmp_path):
         assert spin.value()==50 and check.isChecked() and text.text()=='editable'
     finally:
         dialog.close(); apply_theme(mode='light'); app.processEvents()
+
+
+def test_zoom_ruler_labels_fit_and_actual_handle_drag_with_center_detent():
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QStyleOptionSlider
+    from perovskite.reader import ZoomSlider
+    app=QApplication.instance() or QApplication([])
+    slider=ZoomSlider(Qt.Orientation.Horizontal); slider.setRange(-100,100)
+    resets=[]; slider.resetRequested.connect(lambda:resets.append(True))
+    slider.show()
+    try:
+        for mode in ['light','dark']:
+            apply_theme(mode=mode)
+            for width in [90,230]:
+                slider.setFixedWidth(width); app.processEvents()
+                ticks,labels,top,font=slider.ruler_geometry()
+                assert {'25%','100%','400%'}<={text for text,_ in labels}
+                assert all(slider.rect().contains(rect) for _,rect in labels)
+                assert all(not first.intersects(second) for i,(_,first) in enumerate(labels) for _,second in labels[i+1:])
+                assert slider.height()==30 and len(ticks)>10
+                slider.setValue(100); option=QStyleOptionSlider(); slider.initStyleOption(option)
+                handle=slider.style().subControlRect(QStyle.ComplexControl.CC_Slider,option,QStyle.SubControl.SC_SliderHandle,slider)
+                center=next(x for percent,x,_ in ticks if percent==100)
+                # Start on the real styled handle, then drag toward the ruler's
+                # 100% mark. Painting must not shift the mouse hit target.
+                QTest.mousePress(slider,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,handle.center())
+                QTest.mouseMove(slider,QPoint(center,handle.center().y()),20)
+                QTest.mouseRelease(slider,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,QPoint(center,handle.center().y()))
+                assert slider.value()==0 and not slider.isSliderDown()
+                image=slider.grab().toImage()
+                assert not image.isNull()
+                resets.clear()
+                slider.setValue(50); QTest.mouseDClick(slider,Qt.MouseButton.LeftButton)
+                QTest.mouseRelease(slider,Qt.MouseButton.LeftButton)
+                assert slider.value()==0 and resets
+    finally:
+        slider.close(); apply_theme(mode='light'); app.processEvents()

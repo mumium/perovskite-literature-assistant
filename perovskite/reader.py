@@ -5,11 +5,11 @@ import threading
 from contextlib import nullcontext
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF,QSize
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF,QSize,QRect
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinBox, QPushButton,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView, QProgressBar,QSlider,QColorDialog,QInputDialog)
+    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView, QProgressBar,QSlider,QColorDialog,QInputDialog,QStyle,QStyleOptionSlider)
 from .editing import InlineDelegate,EDIT_ROLE
 from .ui_icons import icon
 from .note_style import default_note_style
@@ -40,7 +40,51 @@ def zoom_slider(value):
 class ZoomSlider(QSlider):
     resetRequested=Signal()
     def __init__(self,*args):
-        super().__init__(*args); self.sliderMoved.connect(self.snap_center)
+        super().__init__(*args)
+        self.setObjectName('zoomRuler'); self.setFixedHeight(30)
+        self.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.sliderMoved.connect(self.snap_center)
+
+    def ruler_geometry(self):
+        # Follow Qt's actual handle travel, including stylesheet padding and
+        # RTL layout. The existing slider is piecewise: 25..100..400 percent.
+        option=QStyleOptionSlider(); self.initStyleOption(option)
+        style=self.style()
+        option.sliderPosition=self.minimum()
+        first=style.subControlRect(QStyle.ComplexControl.CC_Slider,option,QStyle.SubControl.SC_SliderHandle,self)
+        option.sliderPosition=self.maximum()
+        last=style.subControlRect(QStyle.ComplexControl.CC_Slider,option,QStyle.SubControl.SC_SliderHandle,self)
+        left,right=sorted([first.center().x(),last.center().x()])
+        def position(percent):
+            return left+QStyle.sliderPositionFromValue(self.minimum(),self.maximum(),zoom_slider(percent),right-left,option.upsideDown)
+        ticks=[(percent,position(percent),percent in {25,50,75,100,150,200,250,300,350,400})
+               for percent in [25,37.5,50,62.5,75,87.5,100,125,150,175,200,225,250,275,300,325,350,375,400]]
+        font=QFont(self.font()); font.setPixelSize(9)
+        from PySide6.QtGui import QFontMetrics
+        metrics=QFontMetrics(font)
+        labels=[]
+        # Always keep the endpoints and detent readable. Intermediate numbers
+        # appear only when their complete text fits without colliding.
+        for percent in [25,100,400,50,200,300]:
+            text=f'{percent}%'; width=metrics.horizontalAdvance(text)+2
+            x=max(0,min(self.width()-width,position(percent)-width//2))
+            rect=QRect(x,self.height()-metrics.height(),width,metrics.height())
+            if not any(rect.adjusted(-3,0,3,0).intersects(old) for _,old in labels): labels.append((text,rect))
+        return ticks,labels,min(self.height()-metrics.height()-4,first.bottom()+1),font
+
+    def paintEvent(self,event):
+        super().paintEvent(event)
+        from .theme import is_dark
+        ticks,labels,top,font=self.ruler_geometry()
+        painter=QPainter(self); painter.setFont(font)
+        normal=QColor('#a4b9c8' if is_dark() else '#637382')
+        center=QColor('#8ac6e4' if is_dark() else '#28586c')
+        for percent,x,major in ticks:
+            painter.setPen(QPen(center if percent==100 else normal,1))
+            painter.drawLine(x,top,x,top+(4 if percent==100 else 3 if major else 1))
+        for text,rect in labels:
+            painter.setPen(center if text=='100%' else normal)
+            painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,text)
     def snap_center(self,value):
         # Small detent only while dragging: typed 99/101% remains available.
         if self.isSliderDown() and value!=0 and abs(value)<=3: self.setSliderPosition(0)
@@ -443,7 +487,7 @@ class ReaderPanel(QWidget):
         self.page=PageSpinBox(); self.page.setRange(1,1); self.page.setPrefix("页 "); self.page.setToolTip("实际页码：下箭头向后翻页，上箭头向前；也可直接滚动全文"); self.page.valueChanged.connect(self.go_to_page); zoomrow.addWidget(self.page)
         self.zoom_minus=QPushButton('－'); self.zoom_minus.setFixedWidth(28); self.zoom_minus.clicked.connect(lambda:self.adjust_zoom(-25)); zoomrow.addWidget(self.zoom_minus)
         self.zoom_slider=ZoomSlider(Qt.Orientation.Horizontal); self.zoom_slider.setRange(-100,100); self.zoom_slider.setValue(0)
-        self.zoom_slider.setMinimumWidth(90); self.zoom_slider.setMaximumWidth(230); self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow); self.zoom_slider.setTickInterval(100)
+        self.zoom_slider.setMinimumWidth(90); self.zoom_slider.setMaximumWidth(230)
         self.zoom_slider.setToolTip('缩放：左端25%，中间100%轻微吸附，右端400%；双击恢复100%')
         self.zoom_slider.resetRequested.connect(lambda:self.zoom.setValue(100))
         self.zoom_slider.valueChanged.connect(lambda n:self.zoom.setValue(slider_zoom(n))); zoomrow.addWidget(self.zoom_slider,1)

@@ -104,6 +104,7 @@ def stylesheet(mode='light'):
     QSlider::sub-page:horizontal { background:#8aafc3; border-radius:2px; }
     QSlider::handle:horizontal { background:white; border:1px solid #8aafc3; width:12px; margin:-5px 0; border-radius:6px; }
     QSlider::handle:horizontal:hover { background:#dcebf3; border-color:#5792ad; }
+    QSlider#zoomRuler { padding-bottom:14px; }
     QSlider::groove:vertical { width:4px; background:#d6e2ea; border-radius:2px; }
     QSlider::handle:vertical { background:white; border:1px solid #8aafc3; height:12px; margin:0 -5px; border-radius:6px; }
     QScrollBar:vertical { background:#f1f5f8; width:12px; margin:0; border-radius:4px; }
