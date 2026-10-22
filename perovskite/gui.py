@@ -17,7 +17,7 @@ from .exchange import preview, apply_result, strict_json, export_package, eviden
 from .exporting import excel_export, markdown
 from .schema import META_FIELDS, STORY_FIELDS, TAGS, PROMPT, STORY, PROCESS
 from .store import Store, dumps, atomic_json, restore, uid, UNFILED
-from .categories import ArticleTable,CategoryTree
+from .categories import ArticleTable,CategoryTree,CATEGORY_NAME_ROLE
 from .network import crossref, analyze
 from .reader import ReaderPanel
 from .editing import InlineDelegate,EDIT_ROLE,bind,text_value,parse_value,save_content_edit
@@ -147,8 +147,9 @@ class Window(QMainWindow):
         side.addLayout(categorybar)
         self.category_tree=CategoryTree(self.store.root); self.category_tree.setHeaderHidden(True); self.category_tree.setIndentation(10)
         self.category_tree.setMinimumHeight(100); self.category_tree.setMaximumHeight(230)
-        self.category_tree.setToolTip('将文献清单中的文献按住鼠标拖入类别；Ctrl/Shift可多选。一篇文献可加入多个类别。右键可移出、改名或删除类别。')
+        self.category_tree.setToolTip('双击类别名称直接修改，Enter保存、Esc取消。将文献拖入类别，Ctrl/Shift可多选；右键可移出、改名或删除类别。')
         self.category_tree.itemClicked.connect(self.category_clicked); self.category_tree.articlesDropped.connect(self.classify_articles)
+        self.category_tree.nameCommitted.connect(self.rename_category_inline)
         self.category_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.category_tree.customContextMenuRequested.connect(self.category_menu)
         side.addWidget(self.category_tree,1); side.addWidget(self.sidebar,2); split.addWidget(self.sidebar_panel)
         self.refresh_categories()
@@ -321,12 +322,29 @@ class Window(QMainWindow):
         entries=[(None,'全部文献'),(UNFILED,'未分类')]+[(c['category_id'],f"{c['name']}  ({c['article_count']})") for c in self.store.categories()]
         for cid,name in entries:
             item=QTreeWidgetItem([name]); item.setData(0,Qt.ItemDataRole.UserRole,cid); item.setToolTip(0,name)
+            if cid and cid!=UNFILED:
+                item.setFlags(item.flags()|Qt.ItemFlag.ItemIsEditable)
+                item.setData(0,CATEGORY_NAME_ROLE,self.store.category(cid)['name'])
             item.setIcon(0,icon('folder')); self.category_tree.addTopLevelItem(item)
             if cid==self.category_id: self.category_tree.setCurrentItem(item)
         self.category_tree.blockSignals(False)
 
     def category_clicked(self,item,_=0):
-        self.category_id=item.data(0,Qt.ItemDataRole.UserRole); self.refresh()
+        self.category_tree.setCurrentItem(item)
+        cid=item.data(0,Qt.ItemDataRole.UserRole)
+        if cid==self.category_id: return
+        self.category_id=cid; self.refresh(categories=False)
+
+    def rename_category_inline(self,cid,name):
+        try:
+            self.store.rename_category(cid,name)
+            category=next(c for c in self.store.categories() if c['category_id']==cid)
+            for index in range(self.category_tree.topLevelItemCount()):
+                item=self.category_tree.topLevelItem(index)
+                if item.data(0,Qt.ItemDataRole.UserRole)==cid:
+                    item.setData(0,CATEGORY_NAME_ROLE,category['name']); item.setText(0,f"{category['name']}  ({category['article_count']})"); item.setToolTip(0,category['name']); break
+            self.status.setText('类别名称已保存：'+category['name'])
+        except ValueError as exc: self.status.setText('类别名称未保存：'+str(exc))
 
     def current_category(self):
         item=self.category_tree.currentItem(); cid=item.data(0,Qt.ItemDataRole.UserRole) if item else None
@@ -552,8 +570,8 @@ class Window(QMainWindow):
     def selected_ids(self):
         return [self.table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole) for index in self.table.selectionModel().selectedRows()]
 
-    def refresh(self):
-        self.refresh_categories()
+    def refresh(self,*,categories=True):
+        if categories: self.refresh_categories()
         previous = self.article_id
         filters = {self.filter_field.currentData(): self.filter_value.text()}
         rows = self.store.list_articles(self.search.text(), filters,self.category_id)
@@ -1099,7 +1117,7 @@ class Window(QMainWindow):
     def show_help(self):
         text="""首次选择数据目录后自动记忆。顶部图标悬停显示功能名称，包含导入、关联附件、分析包交换、标签管理、换库、备份恢复等。
 导入文件后可直接导出分析包，无需确认角色或配对。需要SI时，先选正文文献，再点关联附件浏览电脑文件。
-左侧手动分类的+按钮可创建类别；将清单文献拖入类别，Ctrl/Shift可多选。一篇文献可归入多个类别。右键可移出、改名或删除类别，文献与附件保留。
+左侧手动分类的+按钮可创建类别；双击类别名称就地修改，Enter保存、Esc取消，固定入口不能改名。将清单文献拖入类别，Ctrl/Shift可多选。一篇文献可归入多个类别。右键可移出、改名或删除类别，文献与附件保留。
 自定义标签可新增、重命名、删除并勾选应用到当前文献；左侧标签上右键也可打开管理。
 文献信息、核心故事、工艺与性能字段可直接双击编辑。单行Enter保存，多行Ctrl+Enter保存，Esc取消，离开编辑框也保存；修订历史保留。编辑后的科学结论需重新核验。
 原文打开后后台预解析所有页的绘制指令并预载预览，显示进度并可暂停、继续。放大立即显示预览，随后从绘制指令补清晰画面。Shift+滚轮左右滚动，Ctrl+滚轮缩放。滑条中点100%轻微吸附，百分比箭头可1%微调。

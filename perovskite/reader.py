@@ -491,7 +491,15 @@ class ReaderPanel(QWidget):
         self.note.editingFinished.connect(self.save_note_text)
         self.highlight_button=QPushButton(); self.highlight_button.setFixedSize(30,26); self.highlight_button.setIconSize(QSize(22,22)); self.highlight_button.setIcon(icon('highlight'))
         self.highlight_button.setToolTip('高亮（Shift+H）'); self.highlight_button.setAccessibleName('高亮'); self.highlight_button.clicked.connect(self.toggle_highlight); row.addWidget(self.highlight_button)
-        self.note_font=QSpinBox(); self.note_font.setRange(6,48); self.note_font.setValue(11); self.note_font.setPrefix('字 '); self.note_font.setFixedWidth(64); self.note_font.setToolTip('选中批注的字体大小（PDF点）'); self.note_font.valueChanged.connect(lambda n:self.change_note_font(size=n)); row.addWidget(self.note_font)
+        self.note_font=QSpinBox(); self.note_font.setRange(6,48); self.note_font.setValue(11); self.note_font.setPrefix('字 ')
+        self.note_font.setFixedSize(88,30); self.note_font.setSingleStep(1); self.note_font.setKeyboardTracking(False)
+        self.note_font.setStyleSheet('''QSpinBox{padding:2px 24px 2px 3px;font-size:12px}
+            QSpinBox::up-button{subcontrol-origin:border;subcontrol-position:top right;width:21px;height:14px;border-left:1px solid #b9c9d2;border-bottom:1px solid #b9c9d2;background:#edf3f7}
+            QSpinBox::down-button{subcontrol-origin:border;subcontrol-position:bottom right;width:21px;height:15px;border-left:1px solid #b9c9d2;background:#edf3f7}
+            QSpinBox::up-button:hover,QSpinBox::down-button:hover{background:#d1e5ef}
+            QSpinBox::up-button:pressed,QSpinBox::down-button:pressed{background:#afcfdf}''')
+        self.note_font.setToolTip('选中批注后，点击右上箭头增大、右下箭头减小字号；每次1点，也可直接输入')
+        self.note_font.valueChanged.connect(lambda n:self.change_note_font(size=n)); row.addWidget(self.note_font)
         self.note_color=QPushButton(); self.note_color.setIcon(icon('font_color')); self.note_color.setFixedWidth(30); self.note_color.setToolTip('选中批注的字体颜色'); self.note_color.clicked.connect(self.choose_note_color); row.addWidget(self.note_color)
         self.marks_button=QPushButton("批注列表 ▾"); self.marks_button.setCheckable(True); row.addWidget(self.marks_button)
         marklayout.addLayout(row)

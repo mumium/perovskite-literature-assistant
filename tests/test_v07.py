@@ -6,7 +6,8 @@ from contextlib import closing
 import pytest
 from PySide6.QtCore import Qt,QPointF
 from PySide6.QtGui import QDropEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication,QLineEdit
+from PySide6.QtTest import QTest
 from perovskite.store import Store,restore,UNFILED,DB_VERSION
 from perovskite.selftest import fixtures
 from perovskite.categories import article_mime,read_article_mime
@@ -97,6 +98,21 @@ def test_actual_table_multiselect_drop_category_filter_and_tab(tmp_path,qt):
     window.category_clicked(item); assert window.table.rowCount()==2 and window.category_id==cid
     window.remove_from_category(); assert window.table.rowCount()==1
     window.clear_filters(); assert window.table.rowCount()==2
+    item=next(window.category_tree.topLevelItem(i) for i in range(window.category_tree.topLevelItemCount()) if window.category_tree.topLevelItem(i).data(0,Qt.ItemDataRole.UserRole)==cid)
+    point=window.category_tree.visualItemRect(item).center()
+    QTest.mouseClick(window.category_tree.viewport(),Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,point)
+    QTest.mouseDClick(window.category_tree.viewport(),Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,point); qt.processEvents()
+    editor=next(e for e in window.category_tree.findChildren(QLineEdit) if e.isVisible())
+    assert editor.text()=='收藏 中文','编辑时不应包含文献计数'
+    editor.setText('双击修改后的类别'); QTest.keyClick(editor,Qt.Key.Key_Return); qt.processEvents()
+    assert window.store.category(cid)['name']=='双击修改后的类别' and window.category_id==cid
+    assert window.table.rowCount()==1 and window.tabs.currentWidget() is window.meta_tab
+    window.category_tree.editItem(item,0); qt.processEvents()
+    editor=next(e for e in window.category_tree.findChildren(QLineEdit) if e.isVisible()); editor.setText('取消的名称'); QTest.keyClick(editor,Qt.Key.Key_Escape); qt.processEvents()
+    assert window.store.category(cid)['name']=='双击修改后的类别'
+    window.category_tree.editItem(item,0); qt.processEvents()
+    editor=next(e for e in window.category_tree.findChildren(QLineEdit) if e.isVisible()); editor.setText('  '); QTest.keyClick(editor,Qt.Key.Key_Return); qt.processEvents()
+    assert window.store.category(cid)['name']=='双击修改后的类别' and '未保存' in window.status.text()
     window.reader.stop(); wait(window.reader,qt); window.close(); qt.processEvents()
 
 def test_full_preload_budget_retained_images_no_jump_or_zoom_render(tmp_path,qt):

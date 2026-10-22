@@ -84,7 +84,7 @@ def audit_index():
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--repository",required=True,help="owner/name")
-    parser.add_argument("--tag",default="v0.8.1")
+    parser.add_argument("--tag",default="v0.8.2")
     parser.add_argument("--publish-public",action="store_true")
     parser.add_argument("--commit-message",default="Update portable literature assistant")
     args=parser.parse_args()
