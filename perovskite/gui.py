@@ -21,7 +21,7 @@ from .categories import ArticleTable,CategoryTree
 from .network import crossref, analyze
 from .reader import ReaderPanel
 from .editing import InlineDelegate,EDIT_ROLE,bind,text_value,parse_value,save_content_edit
-from .ui_icons import icon,svg_pixmap
+from .ui_icons import icon
 
 ROLE_NAMES = {"main": "正文", "si": "SI", "version": "正文版本", "preprint": "预印本", "other": "其他"}
 STATE_NAMES = {"ready": "文字已提取", "partial": "部分页无文字", "no_text": "无文字层", "unsupported": "暂不支持", "error": "解析失败", "duplicate": "重复跳过"}
@@ -106,8 +106,10 @@ class Window(QMainWindow):
         self.banner = banner = QLabel("钙钛矿文献助手")
         banner.setStyleSheet("font-size:18px;font-weight:600;color:#214d62;padding:2px")
         brand = QHBoxLayout()
-        logo = QLabel()
-        logo.setPixmap(svg_pixmap((Path(__file__).resolve().parent.parent/'assets/logo-book-octahedron.svg').read_bytes(),32,max(2,self.devicePixelRatioF())))
+        self.logo=logo=QLabel()
+        # Use exactly the taskbar/window artwork. QIcon selects its high-resolution
+        # ICO frame at the requested physical pixel density, without redrawing it.
+        logo.setPixmap(self.windowIcon().pixmap(QSize(32,32),max(2,self.devicePixelRatioF())))
         brand.addWidget(logo)
         brand.addWidget(banner)
         self.signature=QLabel('MK Design'); self.signature.setStyleSheet('font-size:12px;font-weight:600;color:#647d8c;padding:2px 6px')
