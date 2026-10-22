@@ -417,6 +417,9 @@ class ReaderPanel(QWidget):
 
     def __init__(self,store,parent=None):
         super().__init__(parent)
+        self._ui_ready=False
+        from .theme import apply_theme
+        apply_theme()
         self.store=store
         self.file_id=None; self.kind=None; self.evidence=None
         self.export_worker=None; self.request_serial=0
@@ -433,8 +436,8 @@ class ReaderPanel(QWidget):
         self.file_picker.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
         self.file_picker.currentIndexChanged.connect(lambda index:self.fileRequested.emit(self.file_picker.itemData(index)) if index>=0 else None)
         top.addWidget(self.file_picker,1); self.file_picker.hide()
-        self.focus_button=QPushButton("阅读模式"); self.focus_button.clicked.connect(self.focusRequested.emit); top.addWidget(self.focus_button)
-        self.tools_button=QPushButton("保存批注 ▾"); self.tools_button.setCheckable(True); top.addWidget(self.tools_button)
+        self.focus_button=QPushButton("阅读模式"); self.focus_button.clicked.connect(self.focusRequested.emit)
+        self.tools_button=QPushButton("保存批注 ▾"); self.tools_button.setCheckable(True)
         layout.addLayout(top)
         zoomrow=QHBoxLayout()
         self.page=PageSpinBox(); self.page.setRange(1,1); self.page.setPrefix("页 "); self.page.setToolTip("实际页码：下箭头向后翻页，上箭头向前；也可直接滚动全文"); self.page.valueChanged.connect(self.go_to_page); zoomrow.addWidget(self.page)
@@ -446,9 +449,10 @@ class ReaderPanel(QWidget):
         self.zoom_slider.valueChanged.connect(lambda n:self.zoom.setValue(slider_zoom(n))); zoomrow.addWidget(self.zoom_slider,1)
         self.zoom_plus=QPushButton('＋'); self.zoom_plus.setFixedWidth(28); self.zoom_plus.clicked.connect(lambda:self.adjust_zoom(25)); zoomrow.addWidget(self.zoom_plus)
         self.zoom=QSpinBox(); self.zoom.setRange(25,400); self.zoom.setValue(100); self.zoom.setSuffix('%'); self.zoom.setSingleStep(1); self.zoom.setKeyboardTracking(False)
-        self.zoom.setMinimumSize(88,26); self.zoom.setStyleSheet('QSpinBox{padding:2px 20px 2px 3px;font-size:12px} QSpinBox::up-button{width:18px;subcontrol-position:top right} QSpinBox::down-button{width:18px;subcontrol-position:bottom right}')
+        self.zoom.setMinimumSize(88,30)
         self.zoom.setToolTip('输入百分比，或点击右侧上下箭头精调1%'); self.zoom.valueChanged.connect(self.manual_zoom); zoomrow.addWidget(self.zoom)
-        fit=QPushButton("适合宽度"); fit.clicked.connect(self.fit_width); zoomrow.addWidget(fit)
+        self.fit_button=QPushButton("适合宽度"); self.fit_button.clicked.connect(self.fit_width); zoomrow.addWidget(self.fit_button)
+        zoomrow.addWidget(self.focus_button); zoomrow.addWidget(self.tools_button)
         self.hint=QLabel("PDF拖选文字或双击句子；Ctrl+滚轮缩放")
         self.hint.hide()
         zoomrow.addStretch(); layout.addLayout(zoomrow)
@@ -476,7 +480,6 @@ class ReaderPanel(QWidget):
         self.pdf_view.loadingChanged.connect(self.preload_changed); layout.addWidget(self.preload_panel); self.preload_panel.hide()
         self.scroll=self.pdf_view.scroll
         self.scroll.setToolTip('拖选文字或双击句子；Ctrl+滚轮缩放；Shift+滚轮左右滚动；Shift+H高亮/取消高亮')
-        self.scroll.setStyleSheet("QScrollArea{background:#e1e7ed;border:1px solid #ccd5dc}")
         self.scroll.viewport().installEventFilter(self)
         pagelayout.addWidget(self.pdf_view)
         self.doc_text=QPlainTextEdit(); self.doc_text.setReadOnly(True); self.doc_text.selectionChanged.connect(lambda:self.selection_changed(self.doc_text.textCursor().selectedText()))
@@ -485,20 +488,6 @@ class ReaderPanel(QWidget):
         markpanel=QWidget(); self.mark_panel=markpanel; marklayout=QVBoxLayout(markpanel); marklayout.setContentsMargins(0,0,0,0)
         marklayout.setSpacing(4)
         self.annotation_bar=QWidget(); self.annotation_bar.setObjectName('annotationBar')
-        arrow=(Path(__file__).resolve().parent.parent/'assets'/'chevron-down.svg').as_posix()
-        self.annotation_bar.setStyleSheet('''
-            QWidget#annotationBar QLineEdit,QWidget#annotationBar QComboBox,QWidget#annotationBar QPushButton{
-                border:1px solid #bdcbd5;border-radius:4px;background:#fff;color:#244e63;font-size:12px;}
-            QWidget#annotationBar QLineEdit{padding:0 8px;}
-            QWidget#annotationBar QComboBox{padding:0 22px 0 8px;}
-            QWidget#annotationBar QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:20px;border:none;}
-            QWidget#annotationBar QComboBox::down-arrow{image:url("@ARROW@");width:12px;height:12px;}
-            QWidget#annotationBar QPushButton{padding:0 8px;}
-            QWidget#annotationBar QPushButton:hover,QWidget#annotationBar QComboBox:hover{background:#edf4f8;border-color:#8aafc3;}
-            QWidget#annotationBar QPushButton:pressed,QWidget#annotationBar QPushButton:checked{background:#dcebf3;border-color:#8aafc3;}
-            QWidget#annotationBar QPushButton:disabled{color:#9aa8b1;background:#f5f7f9;}
-            QWidget#annotationBar QLineEdit:focus{border-color:#5792ad;}
-        '''.replace('@ARROW@',arrow))
         row=QHBoxLayout(self.annotation_bar); row.setContentsMargins(0,0,0,0); row.setSpacing(6)
         self.color=QComboBox(); self.color.setFixedSize(80,30); self.color.setToolTip('原文高亮颜色')
         for key,(name,hexcolor) in COLORS.items(): self.color.addItem(name,key)
@@ -510,16 +499,15 @@ class ReaderPanel(QWidget):
         self.note_font=QSpinBox(); self.note_font.setRange(6,48); self.note_font.setValue(11); self.note_font.setPrefix('字 ')
         self.note_font.setFixedSize(60,28); self.note_font.setSingleStep(1); self.note_font.setKeyboardTracking(False)
         self.note_font.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons); self.note_font.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.note_font.setStyleSheet('QSpinBox{padding:0 3px;border:none;background:white;color:#244e63;font-size:12px;}')
+        self.note_font.setObjectName('annotationFont')
         self.note_font.setToolTip('批注字号（6–48点），可直接输入；用两侧−/＋按钮每次调整1点')
         self.note_font_group=QWidget(); self.note_font_group.setObjectName('noteFontGroup'); self.note_font_group.setFixedSize(114,30)
-        self.note_font_group.setStyleSheet('QWidget#noteFontGroup{border:1px solid #bdcbd5;border-radius:4px;background:white;}')
         fontrow=QHBoxLayout(self.note_font_group); fontrow.setContentsMargins(1,1,1,1); fontrow.setSpacing(0)
         self.note_font_minus=QPushButton('−'); self.note_font_plus=QPushButton('＋')
         for button,tip,callback in [(self.note_font_minus,'减小批注字体（每次1点）',self.note_font.stepDown),(self.note_font_plus,'增大批注字体（每次1点）',self.note_font.stepUp)]:
             button.setFixedSize(26,28); button.setToolTip(tip); button.setAccessibleName(tip)
             button.setAutoRepeat(True); button.setAutoRepeatDelay(400); button.setAutoRepeatInterval(90)
-            button.setStyleSheet('QPushButton{padding:0;border:none;border-radius:3px;background:#edf3f7;color:#244e63;font-size:17px;font-weight:600;} QPushButton:hover{background:#dcebf3;} QPushButton:pressed{background:#bdd9e7;} QPushButton:disabled{color:#a1adb5;background:#f5f7f9;}')
+            button.setProperty('fontStepper',True)
             button.clicked.connect(callback)
         fontrow.addWidget(self.note_font_minus); fontrow.addWidget(self.note_font); fontrow.addWidget(self.note_font_plus)
         self.note_font.valueChanged.connect(self.sync_note_font_buttons); self.note_font.valueChanged.connect(lambda n:self.change_note_font(size=n)); row.addWidget(self.note_font_group)
@@ -528,10 +516,6 @@ class ReaderPanel(QWidget):
         self.marks_button=QPushButton("批注列表 ▾"); self.marks_button.setCheckable(True); self.marks_button.setFixedHeight(30); self.marks_button.setMinimumWidth(88); self.marks_button.setToolTip('展开或收起批注列表'); row.addWidget(self.marks_button)
         marklayout.addWidget(self.annotation_bar)
         self.mark_details=QWidget(); details=QVBoxLayout(self.mark_details); details.setContentsMargins(0,0,0,0); details.setSpacing(4)
-        actions=QHBoxLayout()
-        for label,callback in [("修改批注",self.edit_mark)]:
-            button=QPushButton(label); button.clicked.connect(callback); actions.addWidget(button)
-        actions.addStretch(); details.addLayout(actions)
         self.marks=QTreeWidget(); self.marks.setHeaderLabels(["位置 / 颜色","高亮原文","批注"]); self.marks.setColumnWidth(0,130); self.marks.setColumnWidth(1,270)
         self.marks.setMinimumHeight(65); self.marks.setMaximumHeight(120)
         self.marks.setItemDelegate(InlineDelegate(self.marks)); self.marks.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked|QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -546,10 +530,16 @@ class ReaderPanel(QWidget):
         self.shortcuts=[]
         for sequence,callback in [("Ctrl++",lambda:self.adjust_zoom(25)),("Ctrl+=",lambda:self.adjust_zoom(25)),("Ctrl+-",lambda:self.adjust_zoom(-25)),("Ctrl+0",self.fit_width)]:
             shortcut=QShortcut(QKeySequence(sequence),self); shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut); shortcut.activated.connect(callback); self.shortcuts.append(shortcut)
+        self._ui_ready=True
         QApplication.instance().installEventFilter(self)
         self.selected_mark_changed()
 
     def eventFilter(self,watched,event):
+        # Stylesheet polishing can deliver resize events while children are
+        # still being built (and while Qt tears them down on directory switch).
+        from shiboken6 import isValid
+        if not self._ui_ready or not isValid(self.scroll):
+            return False
         if event.type()==QEvent.Type.KeyPress and isinstance(watched,QWidget) and (watched is self or self.isAncestorOf(watched)):
             focus=QApplication.focusWidget()
             typing=isinstance(focus,(QLineEdit,QPlainTextEdit,QTextEdit)) and not focus.isReadOnly()
@@ -861,7 +851,7 @@ class ReaderPanel(QWidget):
                 selection=QTextEdit.ExtraSelection(); selection.cursor=QTextCursor(self.doc_text.document())
                 selection.cursor.setPosition(span["start"]+utf16_length(span["text"][:anchor["start"]]))
                 selection.cursor.setPosition(span["start"]+utf16_length(span["text"][:anchor["end"]]),QTextCursor.MoveMode.KeepAnchor)
-                selection.format.setBackground(QColor(COLORS[mark["color"]][1])); selections.append(selection)
+                selection.format.setBackground(QColor(COLORS[mark["color"]][1])); selection.format.setForeground(QColor('#244e63')); selections.append(selection)
         self.doc_text.setExtraSelections(selections)
 
     def jump_mark(self,item,*_):

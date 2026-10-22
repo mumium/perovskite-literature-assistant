@@ -118,8 +118,8 @@ class ContinuousPdfView(QWidget):
         self.notes_enabled=True
         layout=QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         self.scroll=QScrollArea(); self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
-        self.scroll.setStyleSheet('QScrollArea{background:#e1e7ed;border:1px solid #ccd5dc}')
-        self.document=QWidget(); self.document.setStyleSheet('background:#e1e7ed')
+        self.scroll.setObjectName('pdfScroll')
+        self.document=QWidget(); self.document.setObjectName('pdfDocument')
         self.page_layout=QVBoxLayout(self.document); self.page_layout.setContentsMargins(8,8,8,8); self.page_layout.setSpacing(12)
         self.scroll.setWidget(self.document); layout.addWidget(self.scroll)
         self.scroll.verticalScrollBar().valueChanged.connect(self.scrolled)

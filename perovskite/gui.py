@@ -65,6 +65,8 @@ class Window(QMainWindow):
     directoryRequested=Signal(str)
     def __init__(self, data_dir):
         super().__init__()
+        from .theme import apply_theme
+        apply_theme()
         self.setWindowTitle("钙钛矿文献助手 · MK Design")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "assets" / "logo-book-octahedron.ico")))
         available=QApplication.primaryScreen().availableGeometry()
@@ -77,6 +79,8 @@ class Window(QMainWindow):
             raise ValueError("该数据目录正在使用。请勿同时编辑同一数据目录；关闭另一程序后再试。")
         try:
             self.store = Store(root)
+            preference=json.loads((root/'config.json').read_text(encoding='utf-8')).get('theme','light')
+            apply_theme(mode=preference)
         except Exception:
             self.lock.unlock()
             raise
@@ -104,7 +108,7 @@ class Window(QMainWindow):
         outer = QVBoxLayout(widget)
         outer.setContentsMargins(6,3,6,3); outer.setSpacing(3)
         self.banner = banner = QLabel("钙钛矿文献助手")
-        banner.setStyleSheet("font-size:18px;font-weight:600;color:#214d62;padding:2px")
+        banner.setObjectName('appBanner')
         brand = QHBoxLayout()
         self.logo=logo=QLabel()
         # Use exactly the taskbar/window artwork. QIcon selects its high-resolution
@@ -112,20 +116,22 @@ class Window(QMainWindow):
         logo.setPixmap(self.windowIcon().pixmap(QSize(32,32),max(2,self.devicePixelRatioF())))
         brand.addWidget(logo)
         brand.addWidget(banner)
-        self.signature=QLabel('MK Design'); self.signature.setStyleSheet('font-size:12px;font-weight:600;color:#647d8c;padding:2px 6px')
+        self.signature=QLabel('MK Design'); self.signature.setObjectName('appSignature')
         brand.addWidget(self.signature)
         self.path_label = QLabel("数据目录：" + str(self.store.root) + "   ｜请勿同时编辑同一数据目录")
         self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
         self.path_label.setToolTip(self.path_label.text())
-        self.path_label.setStyleSheet("color:#637382;font-size:11px")
+        self.path_label.setObjectName('dataPath')
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         brand.addWidget(self.path_label,1); outer.addLayout(brand)
         self.toolbar=QToolBar(); self.toolbar.setMovable(False); self.toolbar.setIconSize(QSize(22,22)); self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.toolbar.setStyleSheet('QToolButton{padding:4px;border:1px solid transparent;border-radius:4px} QToolButton:hover{background:#dceaf1;border-color:#adc5d2}')
         outer.addWidget(self.toolbar)
         for name,label,callback in [('import','导入文件',self.import_files),('folder','导入文件夹',self.import_folder),('attach','关联附件',self.pair_file),('export','导出分析包',self.export_analysis),('result','导回结果',self.import_analysis),('prompt','复制AI提示词',self.copy_prompt),('api','API分析',self.api_analyze),('excel','比较 / Excel',self.export_excel),('tags','自定义标签',self.manage_tags),('switch','切换数据目录',self.change_data_directory),('settings','联网配置',self.api_settings),('backup','完整备份',self.backup_data),('restore','恢复到空目录',self.restore_data),('history','修订历史 / 待采用分析候选',self.show_history),('help','使用说明',self.show_help)]:
-            action=self.toolbar.addAction(icon(name),label,callback); action.setToolTip(label); self.busy_controls.append(action)
+            action=self.toolbar.addAction(icon(name),label,callback); action.setToolTip(label); action.setProperty('iconName',name); self.busy_controls.append(action)
             self.toolbar.widgetForAction(action).setAccessibleName(label)
+        self.theme_action=self.toolbar.addAction(icon('moon'),'切换深色模式',self.toggle_theme)
+        self.theme_action.setCheckable(True)
+        self.update_theme_controls()
         split = QSplitter(Qt.Orientation.Horizontal)
         self.main_split = split
         self._reading_mode = False
@@ -143,7 +149,7 @@ class Window(QMainWindow):
         self.sidebar_panel.setMaximumWidth(280); self.sidebar_panel.setMinimumWidth(130)
         categorybar=QHBoxLayout(); categorybar.addWidget(QLabel('手动分类'),1)
         for label,tip,callback in [('+','创建类别',self.create_category),('✎','重命名类别',self.rename_category),('−','删除类别，保留文献',self.delete_category)]:
-            button=QPushButton(label); button.setFixedWidth(24); button.setToolTip(tip); button.setAccessibleName(tip); button.clicked.connect(callback); categorybar.addWidget(button); self.busy_controls.append(button)
+            button=QPushButton(label); button.setProperty('compact',True); button.setFixedWidth(24); button.setToolTip(tip); button.setAccessibleName(tip); button.clicked.connect(callback); categorybar.addWidget(button); self.busy_controls.append(button)
         side.addLayout(categorybar)
         self.category_tree=CategoryTree(self.store.root); self.category_tree.setHeaderHidden(True); self.category_tree.setIndentation(10)
         self.category_tree.setMinimumHeight(100); self.category_tree.setMaximumHeight(230)
@@ -153,7 +159,7 @@ class Window(QMainWindow):
         self.category_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.category_tree.customContextMenuRequested.connect(self.category_menu)
         side.addWidget(self.category_tree,1); side.addWidget(self.sidebar,2); split.addWidget(self.sidebar_panel)
         self.refresh_categories()
-        center = QWidget()
+        center = QWidget(); center.setObjectName('literaturePanel')
         self.center_panel = center
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -312,7 +318,34 @@ class Window(QMainWindow):
         bottom.addWidget(self.progressbar, 1)
         bottom.addWidget(self.cancel_button)
         outer.addLayout(bottom)
-        self.setStyleSheet("QMainWindow{background:#f5f7fa} QPushButton{padding:3px 6px;font-size:12px} QTabBar::tab{padding:5px 6px;font-size:12px} QTabWidget::pane{border:1px solid #ccd5dc} QTreeWidget,QTableWidget,QTextBrowser,QPlainTextEdit{background:white;alternate-background-color:#edf3f7} QHeaderView::section{background:#e4edf3;padding:3px;border:0px;font-size:12px} QLineEdit,QComboBox,QSpinBox{padding:2px;font-size:12px} QProgressBar{max-height:16px} QSplitter::handle{background:#d7e0e7}")
+
+    def update_theme_controls(self):
+        from .theme import is_dark
+        dark=is_dark(); self.theme_action.setChecked(dark)
+        label='切换浅色模式' if dark else '切换深色模式'
+        self.theme_action.setText(label); self.theme_action.setToolTip(label)
+        self.theme_action.setIcon(icon('sun' if dark else 'moon'))
+        self.toolbar.widgetForAction(self.theme_action).setAccessibleName(label)
+        for action in self.toolbar.actions():
+            if name:=action.property('iconName'): action.setIcon(icon(name))
+        if hasattr(self,'category_tree'):
+            for index in range(self.category_tree.topLevelItemCount()):
+                self.category_tree.topLevelItem(index).setIcon(0,icon('folder'))
+        if hasattr(self,'reader'):
+            reader=self.reader
+            reader.highlight_button.setIcon(icon('unhighlight' if reader.highlight_button.accessibleName()=='取消高亮' else 'highlight'))
+            reader.note_color.setIcon(icon('font_color'))
+
+    def toggle_theme(self):
+        from .theme import apply_theme,is_dark
+        mode='light' if is_dark() else 'dark'
+        try:
+            config=json.loads((self.store.root/'config.json').read_text(encoding='utf-8'))
+            config['theme']=mode; atomic_json(self.store.root/'config.json',config)
+        except (OSError,ValueError) as exc:
+            self.update_theme_controls(); self.error(f'无法保存外观设置：{exc}'); return
+        apply_theme(mode=mode); self.update_theme_controls()
+        self.status.setText('已切换深色模式，外观设置已保存' if mode=='dark' else '已切换浅色模式，外观设置已保存')
 
     @property
     def preview_image(self): return self.reader.canvas

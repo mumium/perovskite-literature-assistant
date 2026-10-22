@@ -22,6 +22,8 @@ def main():
     from PySide6.QtCore import QTimer
     from PySide6.QtGui import QFont, QIcon
     application = QApplication(sys.argv[:1])
+    from perovskite.theme import apply_theme
+    apply_theme(application)
     application.setApplicationName("钙钛矿文献助手")
     application.setFont(QFont("Microsoft YaHei UI", 10))
     application.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "logo-book-octahedron.ico")))
@@ -152,6 +154,21 @@ def main():
                 window.reader.open_file(fid)
                 reader_phase['step']=6; QTimer.singleShot(400,finish); return
             window.grab().save(str(root / "GUI原文.png"))
+            from perovskite.theme import is_dark
+            from PySide6.QtGui import QPalette
+            reader=window.reader
+            reader_phase['reader_title_space']=reader.file_picker.width()>=reader.width()-16 and reader.fit_button.geometry().center().y()==reader.focus_button.geometry().center().y()==reader.tools_button.geometry().center().y()
+            window.theme_action.trigger(); application.processEvents()
+            reader_phase['dark_mode']=is_dark() and window.theme_action.isChecked() and reader.file_id==window.preview_file and strict_theme_saved()
+            window.grab().save(str(root/'GUI深色原文.png'))
+            def capture_dialog():
+                dialog=application.activeModalWidget()
+                if dialog:
+                    reader_phase['dark_dialog']=dialog.palette().color(QPalette.ColorRole.Window).lightness()<70
+                    dialog.grab().save(str(root/'GUI深色设置.png')); dialog.reject()
+            QTimer.singleShot(100,capture_dialog); window.api_settings()
+            window.theme_action.trigger(); application.processEvents()
+            reader_phase['theme_restored']=not is_dark() and not window.theme_action.isChecked()
             marks=window.store.highlights(window.reader.file_id)
             reader_phase['page_note_persisted']=bool(marks and marks[0]['appearance'].get('font_size')==14 and marks[0]['appearance'].get('font_color')=='#aa3322' and marks[0]['mark_id'] in window.reader.canvas.note_boxes)
             good = window.preview_image.pixmap() is not None and not window.preview_image.pixmap().isNull()
@@ -189,10 +206,13 @@ def main():
             with Store(child): pass
             reader_phase['startup_child_folder']=not (parent/'library.sqlite').exists() and Path(child).parent==parent.resolve() and (Path(child)/'library.sqlite').exists()
             compact_layout=min(1200,application.primaryScreen().availableGeometry().width()-32)<=window.width()<=1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
-            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder']}
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder','reader_title_space','dark_mode','dark_dialog','theme_restored']}
             atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
             application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(reader_checks.values()) else 1)
+        def strict_theme_saved():
+            import json
+            return json.loads((window.store.root/'config.json').read_text(encoding='utf-8')).get('theme')=='dark'
         QTimer.singleShot(500, screenshot)
     return application.exec()
 

@@ -4,6 +4,8 @@ from PySide6.QtGui import QIcon,QImage,QPainter,QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 PATHS={
+ 'moon':'<path d="M20.5 14A9 9 0 0 1 10 3.5 9 9 0 1 0 20.5 14Z"/>',
+ 'sun':'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
  'highlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h18m-9-17 7 7"/>',
  'unhighlight':'<path d="m14 3 7 7-9 9-7-7z" fill="#ffd84d"/><path d="m5 12-2 7 7-2" fill="#ffd84d"/><path d="M3 22h9m0-17 7 7"/><path d="m17 18 5 5m0-5-5 5" stroke="#c53939" stroke-width="2.3"/>',
  'font_color':'<defs><linearGradient id="fontRainbow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f05c64"/><stop offset=".25" stop-color="#edb42e"/><stop offset=".5" stop-color="#32b691"/><stop offset=".75" stop-color="#4e86e9"/><stop offset="1" stop-color="#a953cf"/></linearGradient></defs><path d="M10.3 3h3.4l7 18h-4l-1.5-4.3H8.8L7.3 21h-4L10.3 3Zm1.7 5-2.1 5.8h4.2L12 8Z" fill="url(#fontRainbow)" fill-rule="evenodd" stroke="none"/>',
@@ -34,7 +36,10 @@ def svg_pixmap(svg,size=32,density=2):
     return QPixmap.fromImage(image)
 
 def icon(name):
-    svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#28586c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{PATHS[name]}</svg>'
+    from .theme import is_dark
+    stroke='#b8dcea' if is_dark() else '#28586c'
+    svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{stroke}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{PATHS[name]}</svg>'
+    if is_dark(): svg=svg.replace('fill="#fff"','fill="#222f3b"')
     result=QIcon()
     for density in [1,2,3]:
         pixmap=svg_pixmap(svg,24,density); result.addPixmap(pixmap)
