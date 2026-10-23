@@ -160,10 +160,25 @@ def main():
                 view=window.reader.pdf_view
                 reader_phase['cross_document_cache']=view.full_ready and view.session_hits>=2 and view.render_count==1 and window.reader.canvas.data['display_list'] is reader_phase['original_commands'] and window.reader.canvas._image.cacheKey()==reader_phase['original_image'] and reader_phase['cache_switch_ms']<1000
                 reader_phase['step']=6; QTimer.singleShot(400,finish); return
+            if reader_phase['step']==6:
+                reader=window.reader; view=reader.pdf_view
+                image=reader.canvas._image.cacheKey(); count=view.render_count; hd_count=view.hd_render_count
+                reader.browse_button.click(); reader.zoom.setValue(350); view.request_visible()
+                reader_phase['fixed_bitmap_mode']=view.fast_browse and reader.browse_button.text()=='高清浏览' and not any(p.hd for p in view.pages) and reader.canvas._image.cacheKey()==image and view.render_count==count and view.hd_render_count==hd_count
+                from perovskite.reader import ReaderPanel
+                probe=ReaderPanel(window.store)
+                reader_phase['browse_mode_saved']=probe.fast_browse and probe.pdf_view.fast_browse and probe.browse_button.text()=='高清浏览'
+                probe.close()
+                application.processEvents(); window.grab().save(str(root/'GUI加速原文.png'))
+                window.theme_action.trigger(); application.processEvents(); window.grab().save(str(root/'GUI深色加速原文.png'))
+                window.theme_action.trigger(); reader.zoom.setValue(200); reader.browse_button.click()
+                reader_phase['step']=7; QTimer.singleShot(400,finish); return
             window.grab().save(str(root / "GUI原文.png"))
             from perovskite.theme import is_dark
             from PySide6.QtGui import QPalette
             reader=window.reader
+            reader_phase['hd_mode_restored']=not reader.fast_browse and not reader.pdf_view.fast_browse and bool(reader.canvas.hd)
+            reader_phase['browse_button_layout']=reader.browse_button.size()==reader.focus_button.size() and reader.focus_button.geometry().right()<reader.browse_button.geometry().left()<reader.tools_button.geometry().left()
             reader_phase['reader_title_space']=reader.file_picker.width()>=reader.width()-16 and reader.fit_button.geometry().center().y()==reader.focus_button.geometry().center().y()==reader.tools_button.geometry().center().y()
             window.theme_action.trigger(); application.processEvents()
             reader_phase['dark_mode']=is_dark() and window.theme_action.isChecked() and reader.file_id==window.preview_file and strict_theme_saved()
@@ -213,7 +228,7 @@ def main():
             with Store(child): pass
             reader_phase['startup_child_folder']=not (parent/'library.sqlite').exists() and Path(child).parent==parent.resolve() and (Path(child)/'library.sqlite').exists()
             compact_layout=min(1200,application.primaryScreen().availableGeometry().width()-32)<=window.width()<=1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
-            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder','reader_title_space','dark_mode','dark_dialog','theme_restored','cross_document_cache']}
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder','reader_title_space','dark_mode','dark_dialog','theme_restored','cross_document_cache','fixed_bitmap_mode','browse_mode_saved','hd_mode_restored','browse_button_layout']}
             reader_checks['cache_switch_ms']=reader_phase['cache_switch_ms']
             atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()

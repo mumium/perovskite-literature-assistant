@@ -120,6 +120,7 @@ class ContinuousPdfView(QWidget):
         self.stopped=True; self.preload_request=None; self.full_ready=False; self.paused=False; self.loading=False; self.load_error=None
         self.selection_span=None
         self.notes_enabled=True
+        self.fast_browse=False
         self.sessions=OrderedDict(); self.session_limit=1024*1024**2; self.session_max_documents=12
         self.session_hits=0; self.cache_notice=''; self._active_key=None
         layout=QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
@@ -210,6 +211,8 @@ class ContinuousPdfView(QWidget):
         self.scroll.horizontalScrollBar().setValue(session['scroll'][0]); self.scroll.verticalScrollBar().setValue(y)
         self._layout_changing=False
         self.set_marks(marks); self.set_notes_enabled(self.notes_enabled)
+        if self.fast_browse:
+            for page in self.pages: page.hd=None; page.update()
         self.currentChanged.emit(self.current)
         if evidence:
             self.evidence=evidence; self.find(evidence['quote'],evidence=True)
@@ -220,6 +223,7 @@ class ContinuousPdfView(QWidget):
             state='ready' if self.full_ready else 'paused' if self.paused else 'failed'
             self.loadingChanged.emit(len(self.cache),len(self.pages),state)
         self._trim_sessions(); self.report_status()
+        if self.full_ready and not self.fast_browse: self.timer.start(1)
         return True
 
     def open(self,path,file_id,expected_hash,page_index,zoom,fit,marks,evidence=None):
@@ -243,7 +247,7 @@ class ContinuousPdfView(QWidget):
         self.stopped=False; self.paused=False; self.load_error=None; self.render_count=0
         self.hd_render_count=0
         self.current=page_index; self.marks=marks; self.evidence=evidence; self.hits={}; self.query=''; self.failed_pages=set()
-        self.quality=max(100,min(400,math.ceil(zoom/100)*100))
+        self.quality=100 if self.fast_browse else max(100,min(400,math.ceil(zoom/100)*100))
         self.preload_request=(None,None); self.start_job()
         return False
 
@@ -253,6 +257,7 @@ class ContinuousPdfView(QWidget):
         if self.preload_request is not None:
             info,indices=self.preload_request; self.preload_request=None; self.loading=True; self.paused=False
             worker=PreloadJob(self.path,self.expected_hash,self.current,self.quality,max(2,self.devicePixelRatioF()),self.cache_limit,info,indices)
+            worker.kind='preload'
             self.worker=worker; self.loadingChanged.emit(len(self.cache),len(self.pages),'loading')
             def metadata(result):
                 if serial!=self.serial or fid!=self.file_id: return
@@ -285,7 +290,7 @@ class ContinuousPdfView(QWidget):
                 self.failed_pages.add(index); self.pages[index].setText(f'第 {index+1} 页加载失败：{message}'); self.report_status()
             worker.metadata.connect(metadata); worker.pageReady.connect(page_ready); worker.pageFailed.connect(page_failed)
         elif self.jobs:
-            function=self.jobs.pop(0); worker=PdfJob(function); self.worker=worker
+            function=self.jobs.pop(0); worker=PdfJob(function); worker.kind='search'; self.worker=worker
             def ready(result):
                 if serial!=self.serial or fid!=self.file_id: return
                 self.hits=result
@@ -304,7 +309,7 @@ class ContinuousPdfView(QWidget):
                 current=path.stat()
                 if (current.st_size,current.st_mtime_ns)!=stat: raise ValueError('附件在阅读期间被修改，请重新导入')
                 return [(key,index,render_detail(dl,rect,scale,cancel)) for key,index,dl,rect,scale in targets]
-            worker=PdfJob(detail); self.worker=worker
+            worker=PdfJob(detail); worker.kind='detail'; self.worker=worker
             def detail_ready(results):
                 if serial!=self.serial or generation!=self.hd_generation: return
                 for key,index,data in results:
@@ -426,7 +431,7 @@ class ContinuousPdfView(QWidget):
         key=min(candidates,key=lambda k:k[2]); value=self.cache[key][0]; self.cache.move_to_end(key); return value
 
     def request_visible(self):
-        if self.stopped or not self.full_ready: return
+        if self.stopped or not self.full_ready or self.fast_browse: return
         targets=[]
         for index in self.visible_indices():
             page=self.pages[index]; data=page.data; scale=self.scale_for(page.geometry_info)
@@ -456,12 +461,21 @@ class ContinuousPdfView(QWidget):
         display['evidence_rects']=[h['display_rect'] for h in self.hits.get(index,[])] if self.evidence else []
         page.blockSignals(True)
         page.set_page(display,self.marks,self.file_id); page.set_display_scale(self.scale_for(page.geometry_info))
+        if self.fast_browse: page.hd=None
         page.blockSignals(False)
         if active is not None or manual is not None: page.selection=active; page.manual_selection=manual
 
     def set_marks(self,marks):
         self.marks=marks
         for page in self.pages: page.marks=marks; page.sync_notes(); page.update()
+
+    def set_fast_browse(self,enabled):
+        self.fast_browse=bool(enabled); self.hd_generation+=1; self.hd_request=None; self.timer.stop()
+        if self.fast_browse:
+            if self.worker and getattr(self.worker,'kind',None)=='detail': self.worker.cancelled.set()
+            for page in self.pages: page.hd=None; page.update()
+        elif self.full_ready and not self.stopped: self.timer.start(1)
+        self.report_status()
 
     def set_notes_enabled(self,enabled):
         self.notes_enabled=enabled
@@ -481,6 +495,7 @@ class ContinuousPdfView(QWidget):
         if not self.pages: return
         page=self.pages[self.current]; zoom=round(self.scale_for(page.geometry_info)*75)
         text=f'实际页 {self.current+1}/{len(self.pages)} · {zoom}% · 连续滚动 · {len(self.marks)}条高亮'
+        text+=' · 加速浏览' if self.fast_browse else ' · 高清浏览'
         if page.data and not page.data['words']: text+=' · 本页无可选文字，扫描页需OCR'
         loaded=len(self.cache)
         text+=f' · 全文已加载 {loaded}/{len(self.pages)}' if self.full_ready else f' · 全文预加载 {loaded}/{len(self.pages)}'

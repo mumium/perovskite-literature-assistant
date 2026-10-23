@@ -3,7 +3,8 @@ import time
 from collections import Counter
 import fitz
 import pytest
-from PySide6.QtCore import Qt,QPoint
+from PySide6.QtCore import Qt,QPoint,QPointF,QEvent
+from PySide6.QtGui import QEnterEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication,QTabWidget
 from perovskite.reader import ReaderPanel
@@ -44,8 +45,13 @@ def test_toolbar_real_hover_pressed_feedback_and_text_tabs(tmp_path,app):
         for mode in ['light','dark']:
             apply_theme(mode=mode); QTest.qWait(100)
             QTest.mouseMove(window.banner,QPoint(10,10)); button.clearFocus(); QTest.qWait(100)
+            app.sendEvent(button,QEvent(QEvent.Type.Leave))
             normal=pixel()
             QTest.mouseMove(button,button.rect().center()); QTest.qWait(100)
+            # Send the widget enter event as well: a desktop host can take OS
+            # foreground focus while this test is running in the background.
+            point=QPointF(button.rect().center())
+            app.sendEvent(button,QEnterEvent(point,point,QPointF(button.mapToGlobal(point.toPoint()))))
             hover=pixel()
             button.setDown(True); app.processEvents(); pressed=pixel(); button.setDown(False)
             assert len({normal,hover,pressed})==3,'无框图标必须有可见的悬停和按下反馈'

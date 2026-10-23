@@ -37,9 +37,9 @@ def svg_pixmap(svg,size=32,density=2):
 
 def icon(name):
     from .theme import is_dark
-    stroke='#b8dcea' if is_dark() else '#28586c'
+    stroke='#d1d1d6' if is_dark() else '#48484a'
     svg=f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{stroke}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{PATHS[name]}</svg>'
-    if is_dark(): svg=svg.replace('fill="#fff"','fill="#222f3b"')
+    if is_dark(): svg=svg.replace('fill="#fff"','fill="#2c2c2e"')
     result=QIcon()
     for density in [1,2,3]:
         pixmap=svg_pixmap(svg,24,density); result.addPixmap(pixmap)

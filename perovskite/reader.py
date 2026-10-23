@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinB
 from .editing import InlineDelegate,EDIT_ROLE
 from .ui_icons import icon
 from .note_style import default_note_style
+from .store import atomic_json
 
 from .extract import digest, PDF_LOCK
 
@@ -78,8 +79,8 @@ class ZoomSlider(QSlider):
         from .theme import is_dark
         ticks,labels,top,font=self.ruler_geometry()
         painter=QPainter(self); painter.setFont(font)
-        normal=QColor('#a4b9c8' if is_dark() else '#637382')
-        center=QColor('#8ac6e4' if is_dark() else '#28586c')
+        normal=QColor('#aeaeb2' if is_dark() else '#86868b')
+        center=QColor('#0a84ff' if is_dark() else '#007aff')
         for percent,x,major in ticks:
             painter.setPen(QPen(center if percent==100 else normal,1))
             painter.drawLine(x,top,x,top+(4 if percent==100 else 3 if major else 1))
@@ -470,6 +471,7 @@ class ReaderPanel(QWidget):
         self.export_worker=None; self.request_serial=0
         self.zoom_mode="fit"; self.spans=[]; self.base_font=QApplication.font()
         self.text_sessions=OrderedDict(); self._text_current=None; self.text_session_hits=0
+        self.fast_browse=json.loads((self.store.root/'config.json').read_text(encoding='utf-8')).get('pdf_browse_mode','hd')=='fast'
         self.layout_ui()
 
     def layout_ui(self):
@@ -483,6 +485,8 @@ class ReaderPanel(QWidget):
         self.file_picker.currentIndexChanged.connect(lambda index:self.fileRequested.emit(self.file_picker.itemData(index)) if index>=0 else None)
         top.addWidget(self.file_picker,1); self.file_picker.hide()
         self.focus_button=QPushButton("阅读模式"); self.focus_button.clicked.connect(self.focusRequested.emit)
+        self.browse_button=QPushButton(); self.browse_button.setObjectName('browseModeButton'); self.browse_button.setCheckable(True)
+        self.browse_button.clicked.connect(self.toggle_browse_mode); self.update_browse_button()
         self.tools_button=QPushButton("保存批注 ▾"); self.tools_button.setCheckable(True)
         layout.addLayout(top)
         zoomrow=QHBoxLayout()
@@ -498,7 +502,7 @@ class ReaderPanel(QWidget):
         self.zoom.setMinimumSize(88,30)
         self.zoom.setToolTip('输入百分比，或点击右侧上下箭头精调1%'); self.zoom.valueChanged.connect(self.manual_zoom); zoomrow.addWidget(self.zoom)
         self.fit_button=QPushButton("适合宽度"); self.fit_button.clicked.connect(self.fit_width); zoomrow.addWidget(self.fit_button)
-        zoomrow.addWidget(self.focus_button); zoomrow.addWidget(self.tools_button)
+        zoomrow.addWidget(self.focus_button); zoomrow.addWidget(self.browse_button); zoomrow.addWidget(self.tools_button)
         self.hint=QLabel("PDF拖选文字或双击句子；Ctrl+滚轮缩放")
         self.hint.hide()
         zoomrow.addStretch(); layout.addLayout(zoomrow)
@@ -516,6 +520,7 @@ class ReaderPanel(QWidget):
         pages=QWidget(); pagelayout=QVBoxLayout(pages); pagelayout.setContentsMargins(0,0,0,0)
         from .continuous import ContinuousPdfView
         self.pdf_view=ContinuousPdfView(PdfCanvas,self)
+        self.pdf_view.set_fast_browse(self.fast_browse)
         self.pdf_view.selectionChanged.connect(self.selection_changed); self.pdf_view.highlightRequested.connect(self.toggle_highlight); self.pdf_view.zoomRequested.connect(self.adjust_zoom)
         self.pdf_view.currentChanged.connect(self.current_page_changed); self.pdf_view.markSelected.connect(self.select_mark); self.pdf_view.deleteRequested.connect(self.delete_mark)
         self.pdf_view.status.connect(self.status_text); self.pdf_view.error.connect(self.error.emit)
@@ -609,6 +614,24 @@ class ReaderPanel(QWidget):
         self.preload_progress.setRange(0,total); self.preload_progress.setValue(done)
         self.preload_progress.setFormat(f'全文预加载 {done}/{total}' if total else '正在读取全文信息…')
         self.preload_button.setText('暂停预载' if state=='loading' else '继续预载' if state=='paused' else '重试预载')
+
+    def update_browse_button(self):
+        self.browse_button.setChecked(self.fast_browse)
+        self.browse_button.setText('高清浏览' if self.fast_browse else '加速浏览')
+        current='加速浏览：缩放固定预览图片，放大后不补绘高清细节' if self.fast_browse else '高清浏览：放大后按需补绘原文字与矢量细节'
+        target='恢复高清浏览' if self.fast_browse else '切换加速浏览'
+        self.browse_button.setToolTip(f'当前PDF模式：{current}\n点击{target}；此选择随当前数据目录保存，重启后恢复。')
+        self.browse_button.setAccessibleName(target)
+
+    def toggle_browse_mode(self):
+        enabled=not self.fast_browse
+        try:
+            path=self.store.root/'config.json'; config=json.loads(path.read_text(encoding='utf-8'))
+            config['pdf_browse_mode']='fast' if enabled else 'hd'; atomic_json(path,config)
+        except (OSError,ValueError) as exc:
+            self.update_browse_button(); self.error.emit(f'无法保存PDF浏览模式：{exc}'); return
+        self.fast_browse=enabled; self.update_browse_button(); self.pdf_view.set_fast_browse(enabled)
+        if self.kind!='pdf': self.status.setText('PDF浏览模式已保存，下次打开PDF时使用；不影响DOCX文本显示')
 
     def toggle_preload(self):
         if self.pdf_view.loading: self.pdf_view.pause_loading()
