@@ -117,6 +117,30 @@ def test_partial_pdf_only_resumes_missing_pages(tmp_path,app,monkeypatch):
         finally: finish(panel,app)
 
 
+def test_cached_fit_reading_position_survives_window_width_changes(tmp_path,app,monkeypatch):
+    with Store(tmp_path/'resize library') as store:
+        a=store.import_file(paper(tmp_path/'resize A.pdf',4,'RESIZE A'))
+        b=store.import_file(paper(tmp_path/'resize B.pdf',2,'RESIZE B'))
+        panel=ReaderPanel(store); panel.resize(850,740); panel.show()
+        try:
+            panel.open_file(a['file_id']); wait(panel,app); view=panel.pdf_view
+            view.navigate(2); view.scroll.verticalScrollBar().setValue(view.scroll.verticalScrollBar().value()+90); wait(panel,app)
+            index=view.current; page=view.pages[index]
+            fraction=(view.scroll.verticalScrollBar().value()-page.y())/page.height()
+            document=view.document
+            for width in [1200,700]:
+                panel.open_file(b['file_id']); wait(panel,app)
+                panel.resize(width,740); wait(panel,app)
+                with monkeypatch.context() as patch:
+                    patch.setattr('perovskite.reader.load_pdf_page',lambda *a,**k:pytest.fail('改变窗口宽度不应重复预载缓存PDF'))
+                    panel.open_file(a['file_id']); wait(panel,app)
+                assert view.document is document and view.full_ready and view.current==index
+                page=view.pages[index]
+                restored=(view.scroll.verticalScrollBar().value()-page.y())/page.height()
+                assert restored==pytest.approx(fraction,abs=.005)
+        finally: finish(panel,app)
+
+
 @pytest.mark.parametrize('bound',['count','memory'])
 def test_cached_changed_pdf_rejected_and_lru_releases_old_documents(tmp_path,app,bound):
     with Store(tmp_path/'bounded library') as store:

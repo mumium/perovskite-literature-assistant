@@ -174,6 +174,8 @@ class ContinuousPdfView(QWidget):
             old.hide(); old.setParent(self)
             session={name:getattr(self,name) for name in self.SESSION_FIELDS if hasattr(self,name)}
             session['scroll']=scroll_position; session['viewport_width']=viewport_width
+            anchor=self.pages[self.current] if self.pages else None
+            session['page_fraction']=(scroll_position[1]-anchor.y())/max(1,anchor.height()) if anchor else 0
             session['full_ready']=bool(self.pages) and all(p.data for p in self.pages) and not self.load_error
             if retain and self._active_key and self.info:
                 previous=self.sessions.pop(self._active_key,None)
@@ -200,10 +202,12 @@ class ContinuousPdfView(QWidget):
         self._active_key=key; self.stopped=False; self.session_hits+=1
         self.scroll.setWidget(self.document); self.document.show(); self.page_layout.activate()
         self._layout_changing=False
-        if self.zoom!=zoom or self.fit!=fit or (fit and session['viewport_width']!=self.scroll.viewport().width()):
+        layout_changed=self.fit!=fit or (not fit and self.zoom!=zoom) or (fit and session['viewport_width']!=self.scroll.viewport().width())
+        if self.zoom!=zoom or layout_changed:
             self.set_zoom(zoom,fit,False)
         self._layout_changing=True
-        self.scroll.horizontalScrollBar().setValue(session['scroll'][0]); self.scroll.verticalScrollBar().setValue(session['scroll'][1])
+        y=round(self.pages[self.current].y()+session['page_fraction']*self.pages[self.current].height()) if layout_changed else session['scroll'][1]
+        self.scroll.horizontalScrollBar().setValue(session['scroll'][0]); self.scroll.verticalScrollBar().setValue(y)
         self._layout_changing=False
         self.set_marks(marks); self.set_notes_enabled(self.notes_enabled)
         self.currentChanged.emit(self.current)
