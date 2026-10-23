@@ -124,7 +124,7 @@ class Window(QMainWindow):
         self.path_label.setObjectName('dataPath')
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         brand.addWidget(self.path_label,1); outer.addLayout(brand)
-        self.toolbar=QToolBar(); self.toolbar.setMovable(False); self.toolbar.setIconSize(QSize(22,22)); self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.toolbar=QToolBar(); self.toolbar.setObjectName('mainToolbar'); self.toolbar.setMovable(False); self.toolbar.setIconSize(QSize(22,22)); self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         outer.addWidget(self.toolbar)
         for name,label,callback in [('import','导入文件',self.import_files),('folder','导入文件夹',self.import_folder),('attach','关联附件',self.pair_file),('export','导出分析包',self.export_analysis),('result','导回结果',self.import_analysis),('prompt','复制AI提示词',self.copy_prompt),('api','API分析',self.api_analyze),('excel','比较 / Excel',self.export_excel),('tags','自定义标签',self.manage_tags),('switch','切换数据目录',self.change_data_directory),('settings','联网配置',self.api_settings),('backup','完整备份',self.backup_data),('restore','恢复到空目录',self.restore_data),('history','修订历史 / 待采用分析候选',self.show_history),('help','使用说明',self.show_help)]:
             action=self.toolbar.addAction(icon(name),label,callback); action.setToolTip(label); action.setProperty('iconName',name); self.busy_controls.append(action)

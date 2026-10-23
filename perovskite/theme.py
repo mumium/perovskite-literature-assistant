@@ -81,6 +81,9 @@ def stylesheet(mode='light'):
     QTabBar::tab:disabled { color:#9aa8b1; background:#f5f7f9; }
     QTabBar QToolButton { padding:0; }
     QToolBar { background:transparent; border:none; spacing:4px; }
+    QToolBar#mainToolbar QToolButton {
+        border:none; background:transparent; padding:4px; border-radius:0; outline:0;
+    }
     QToolBar::separator { background:#d6dfe5; width:1px; margin:4px; }
     QMenu,QMenuBar { background:white; color:#244e63; }
     QMenu { border:1px solid #bdcbd5; border-radius:4px; padding:4px; }
