@@ -84,6 +84,11 @@ def stylesheet(mode='light'):
     QToolBar#mainToolbar QToolButton {
         border:none; background:transparent; padding:4px; border-radius:0; outline:0;
     }
+    QToolBar#mainToolbar QToolButton:hover,QToolBar#mainToolbar QToolButton:focus {
+        background:#dcebf3; border-radius:4px;
+    }
+    QToolBar#mainToolbar QToolButton:pressed { background:#bdd9e7; border-radius:4px; }
+    QToolBar#mainToolbar QToolButton:disabled { background:transparent; }
     QToolBar::separator { background:#d6dfe5; width:1px; margin:4px; }
     QMenu,QMenuBar { background:white; color:#244e63; }
     QMenu { border:1px solid #bdcbd5; border-radius:4px; padding:4px; }

@@ -42,6 +42,7 @@ if run.stderr:
 gui=report.get("gui-report.json",{})
 required=["pdf_preview","original_hash_unchanged","pdf_highlight_persisted","zoom_persisted","docx_highlight_persisted","native_pdf_annotations","write_back_backup","automatic_original","compact_layout","startup_memory","continuous_pages","instant_zoom","character_selection","tab_preserved","full_preload","manual_categories","vector_detail","zoom_center_snap","page_note_persisted","native_note_box","yellow_highlight_icon","highlight_shortcut","startup_child_folder"]
 required += ['reader_title_space','dark_mode','dark_dialog','theme_restored']
+required += ['cross_document_cache']
 passed = run.returncode==0 and report.get("selftest-report.json",{}).get("passed") and all(gui.get(k) for k in required) and report["only_exe_in_launch_folder"] and not report["temporary_MEI_remaining"]
 report["passed"] = bool(passed)
 (workspace / "dist" / "验收报告.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

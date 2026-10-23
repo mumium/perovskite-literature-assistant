@@ -1173,7 +1173,7 @@ class Window(QMainWindow):
             QTimer.singleShot(100,self.close)
             event.ignore(); return
         self.reader.stop()
-        self.reader.pdf_view.clear()
+        self.reader.release_cache()
         self.store.close()
         self.lock.unlock()
         event.accept()

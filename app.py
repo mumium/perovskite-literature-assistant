@@ -120,6 +120,8 @@ def main():
                 QTimer.singleShot(500,finish); return
             if reader_phase["step"] == 1:
                 view=window.reader.pdf_view
+                reader_phase['original_commands']=window.reader.canvas.data['display_list']
+                reader_phase['original_image']=window.reader.canvas._image.cacheKey()
                 reader_phase['vector_detail']=bool(window.reader.canvas.hd) and view.hd_render_count>0 and all(p.data.get('display_list') for p in view.pages)
                 reader_phase['yellow_highlight_icon']='取消高亮' in window.reader.highlight_button.toolTip()
                 slider=window.reader.zoom_slider; slider.setSliderDown(True); slider.setSliderPosition(2)
@@ -151,7 +153,12 @@ def main():
                 reader_phase['step']=5; QTimer.singleShot(400,finish); return
             if reader_phase['step']==5:
                 fid=next(f['file_id'] for f in window.store.files(report['article_id']) if f['role']=='main')
+                import time
+                started=time.perf_counter()
                 window.reader.open_file(fid)
+                reader_phase['cache_switch_ms']=round((time.perf_counter()-started)*1000,1)
+                view=window.reader.pdf_view
+                reader_phase['cross_document_cache']=view.full_ready and view.session_hits>=2 and view.render_count==1 and window.reader.canvas.data['display_list'] is reader_phase['original_commands'] and window.reader.canvas._image.cacheKey()==reader_phase['original_image'] and reader_phase['cache_switch_ms']<1000
                 reader_phase['step']=6; QTimer.singleShot(400,finish); return
             window.grab().save(str(root / "GUI原文.png"))
             from perovskite.theme import is_dark
@@ -206,10 +213,11 @@ def main():
             with Store(child): pass
             reader_phase['startup_child_folder']=not (parent/'library.sqlite').exists() and Path(child).parent==parent.resolve() and (Path(child)/'library.sqlite').exists()
             compact_layout=min(1200,application.primaryScreen().availableGeometry().width()-32)<=window.width()<=1280 and window.height()==720 and window.reader.doc_text.viewport().height()>=400 and window.table.rowHeight(0)==32
-            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder','reader_title_space','dark_mode','dark_dialog','theme_restored']}
+            reader_checks={k:reader_phase.get(k,False) for k in ['continuous_pages','instant_zoom','character_selection','tab_preserved','full_preload','manual_categories','vector_detail','zoom_center_snap','page_note_persisted','native_note_box','yellow_highlight_icon','highlight_shortcut','startup_child_folder','reader_title_space','dark_mode','dark_dialog','theme_restored','cross_document_cache']}
+            reader_checks['cache_switch_ms']=reader_phase['cache_switch_ms']
             atomic_json(root / "gui-report.json", {**reader_checks,"pdf_preview": good, "startup_memory":startup_memory,"automatic_original":automatic_original,"compact_layout":compact_layout,"original_hash_unchanged": unchanged, "native_pdf_annotations":native_saved,"write_back_backup":native_backup,"pdf_highlight_persisted":highlight_saved,"zoom_persisted":zoom_saved,"docx_highlight_persisted":docx_saved,"article_count": window.table.rowCount(), "data_dir": str(window.store.root), "frozen": bool(getattr(sys, "frozen", False)), "qt_runtime": PySide6.__file__, "pdf_runtime": fitz.__file__})
             window.close()
-            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(reader_checks.values()) else 1)
+            application.exit(0 if good and unchanged and highlight_saved and zoom_saved and docx_saved and native_saved and native_backup and automatic_original and compact_layout and startup_memory and all(v for k,v in reader_checks.items() if k!='cache_switch_ms') else 1)
         def strict_theme_saved():
             import json
             return json.loads((window.store.root/'config.json').read_text(encoding='utf-8')).get('theme')=='dark'

@@ -3,13 +3,14 @@ import json
 import math
 import threading
 from contextlib import nullcontext
+from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QRectF,QSize,QRect
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QImage, QFont, QTextCursor, QShortcut, QKeySequence,QTextDocument
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSpinBox, QPushButton,
     QScrollArea, QPlainTextEdit, QComboBox, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView, QProgressBar,QSlider,QColorDialog,QInputDialog,QStyle,QStyleOptionSlider)
+    QApplication, QMenu, QTextEdit, QDialog, QDialogButtonBox, QFormLayout, QSplitter, QFileDialog, QMessageBox, QSizePolicy, QAbstractSpinBox, QAbstractItemView, QProgressBar,QSlider,QColorDialog,QInputDialog,QStyle,QStyleOptionSlider,QPlainTextDocumentLayout)
 from .editing import InlineDelegate,EDIT_ROLE
 from .ui_icons import icon
 from .note_style import default_note_style
@@ -468,6 +469,7 @@ class ReaderPanel(QWidget):
         self.file_id=None; self.kind=None; self.evidence=None
         self.export_worker=None; self.request_serial=0
         self.zoom_mode="fit"; self.spans=[]; self.base_font=QApplication.font()
+        self.text_sessions=OrderedDict(); self._text_current=None; self.text_session_hits=0
         self.layout_ui()
 
     def layout_ui(self):
@@ -643,17 +645,19 @@ class ReaderPanel(QWidget):
         self.file_picker.setVisible(bool(files)); self.label.setVisible(not files)
 
     def clear_file(self,message="当前文献没有可预览附件"):
-        self.stop(); self.file_id=None; self.kind=None; self.evidence=None
-        self.pdf_view.clear(); self.pdf_view.show(); self.doc_text.hide()
+        self.stop(); self._suspend_text(); self.pdf_view.retain_current()
+        self.file_id=None; self.kind=None; self.evidence=None
+        self.pdf_view.show(); self.doc_text.hide()
         self.doc_text.clear(); self.marks.clear(); self.query.clear(); self.note.clear()
         self.export_copy.setEnabled(False); self.write_original.setEnabled(False)
         self.label.setText(message); self.status.setText(message)
 
     def open_file(self,file_id,evidence=None):
+        self.fit_timer.stop(); self._suspend_text()
         self.file_id=file_id; self.evidence=evidence; self.query.clear(); self.note.clear()
         self.file_picker.blockSignals(True); self.file_picker.setCurrentIndex(self.file_picker.findData(file_id)); self.file_picker.blockSignals(False)
         self.request_serial+=1; self.pdf_view.stop()
-        file=self.store.file(file_id); extraction=json.loads(file["extracted"])
+        file=self.store.file(file_id)
         self.kind=Path(file["path"]).suffix.lstrip(".").lower()
         self.label.setText(file["name"]); self.label.setToolTip(file["reason"])
         state=self.store.reader_state(file_id); self.zoom_mode=state["zoom_mode"]
@@ -663,25 +667,67 @@ class ReaderPanel(QWidget):
         self.export_copy.setEnabled(pdf and not self.export_worker); self.write_original.setEnabled(pdf and not self.export_worker)
         self.page.setVisible(pdf)
         self.pdf_view.setVisible(pdf); self.doc_text.setVisible(not pdf)
-        self.load_marks()
         if pdf:
             page=state["page_index"]+1
             if evidence:
+                extraction=json.loads(file['extracted'])
                 loc=next((x for x in extraction["locations"] if x["loc_id"]==evidence["loc_id"]),None)
                 if loc: page=loc["page_index"]+1
             self.page.blockSignals(True); self.page.setRange(1,max(page,1)); self.page.setValue(page); self.page.blockSignals(False)
             self.pdf_view.open(self.store.path(file_id),file_id,file['sha256'],page-1,self.zoom.value(),self.zoom_mode=='fit',self.store.highlights(file_id),evidence)
+            self.query.setText(self.pdf_view.query)
+            self.load_marks()
         else:
-            self.pdf_view.clear()
-            self.doc_text.setPlainText("")
-            text,self.spans=docx_display(extraction["locations"])
-            self.doc_text.setPlainText(text or file["reason"])
+            self.pdf_view.retain_current()
+            self._open_text(file)
+            self.load_marks()
             self.apply_docx_zoom(); self.paint_docx_marks()
             if evidence:
                 cursor=self.doc_text.document().find("["+evidence["loc_id"]+"]")
                 if not cursor.isNull(): self.doc_text.setTextCursor(cursor); self.doc_text.ensureCursorVisible()
             self.hint.setText("DOCX直接选中文字后点击高亮；位置使用段落/表格行")
             self.status.setText(file["reason"])
+
+    def _suspend_text(self):
+        if not self._text_current: return
+        entry=self._text_current
+        entry['scroll']=(self.doc_text.horizontalScrollBar().value(),self.doc_text.verticalScrollBar().value())
+        self.text_sessions[entry['key']]=entry; self._text_current=None
+        blank=QTextDocument(self.doc_text); blank.setDocumentLayout(QPlainTextDocumentLayout(blank))
+        self.doc_text.setDocument(blank)
+        while self.text_sessions and (len(self.text_sessions)>12 or sum(e['document'].characterCount()*8 for e in self.text_sessions.values())>64*1024**2):
+            _,old=self.text_sessions.popitem(last=False); old['document'].deleteLater()
+
+    def _open_text(self,file):
+        path=self.store.path(self.file_id)
+        key=(str(path.resolve()),self.file_id,file['sha256']); stamp=self.pdf_view.file_stamp(path)
+        entry=self.text_sessions.pop(key,None)
+        if entry and entry['stamp']!=stamp:
+            entry['document'].deleteLater()
+            raise ValueError('附件在阅读后被修改，请重新导入；未复用旧原文或批注')
+        if entry and entry['extracted']!=file['extracted']:
+            entry['document'].deleteLater(); entry=None
+        if entry: self.text_session_hits+=1
+        else:
+            text,spans=docx_display(json.loads(file['extracted'])['locations'])
+            document=QTextDocument(self); document.setDocumentLayout(QPlainTextDocumentLayout(document)); document.setPlainText(text or file['reason'])
+            entry={'key':key,'stamp':stamp,'extracted':file['extracted'],'document':document,'spans':spans,'scroll':(0,0)}
+        while len(self.text_sessions)>=12:
+            _,old=self.text_sessions.popitem(last=False); old['document'].deleteLater()
+        self._text_current=entry; self.spans=entry['spans']; self.doc_text.setDocument(entry['document'])
+        self.apply_docx_zoom()
+        self.doc_text.horizontalScrollBar().setValue(entry['scroll'][0]); self.doc_text.verticalScrollBar().setValue(entry['scroll'][1])
+
+    def release_cache(self):
+        self._suspend_text()
+        for entry in self.text_sessions.values(): entry['document'].deleteLater()
+        self.text_sessions.clear(); self.pdf_view.clear()
+
+    def closeEvent(self,event):
+        self.stop()
+        if self.active_worker or self.export_worker:
+            event.ignore(); QTimer.singleShot(50,self.close); return
+        self.release_cache(); QApplication.instance().removeEventFilter(self); event.accept()
 
     def manual_zoom(self,value):
         self.sync_zoom_slider()

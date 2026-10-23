@@ -94,6 +94,10 @@ class PreloadJob(QThread):
             if not self.cancelled.is_set(): self.failed.emit(str(exc))
 
 class ContinuousPdfView(QWidget):
+    SESSION_FIELDS=('document','page_layout','pages','info','file_id','path','expected_hash','source_stamp',
+        'zoom','fit','quality','marks','hits','query','evidence','current','active_canvas','selection_span',
+        'cache','cache_bytes','hd_cache','hd_bytes','render_count','hd_render_count','failed_pages',
+        'full_ready','paused','load_error')
     currentChanged=Signal(int)
     selectionChanged=Signal(str)
     highlightRequested=Signal()
@@ -116,6 +120,8 @@ class ContinuousPdfView(QWidget):
         self.stopped=True; self.preload_request=None; self.full_ready=False; self.paused=False; self.loading=False; self.load_error=None
         self.selection_span=None
         self.notes_enabled=True
+        self.sessions=OrderedDict(); self.session_limit=1024*1024**2; self.session_max_documents=12
+        self.session_hits=0; self.cache_notice=''; self._active_key=None
         layout=QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         self.scroll=QScrollArea(); self.scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
         self.scroll.setObjectName('pdfScroll')
@@ -138,20 +144,104 @@ class ContinuousPdfView(QWidget):
         if self.worker: self.worker.cancelled.set()
 
     def clear(self):
-        self.stop(); self.info=None; self.file_id=None; self.active_canvas=None; self.selection_span=None
-        for page in self.pages:
-            self.page_layout.removeWidget(page); page.release_bitmap(True); page.deleteLater()
-        self.pages=[]; self.cache.clear(); self.cache_bytes=0; self.full_ready=False
-        self.hd_cache.clear(); self.hd_bytes=0
-        self.document.setFixedSize(1,1); self.loadingChanged.emit(0,0,'empty')
+        self.suspend(retain=False)
+        for session in self.sessions.values(): self._dispose_session(session)
+        self.sessions.clear(); self.cache_notice=''
+
+    @staticmethod
+    def file_stamp(path):
+        stat=path.stat()
+        return stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns
+
+    def _dispose_session(self,session):
+        for page in session['pages']: page.release_bitmap(True)
+        session['cache'].clear(); session['hd_cache'].clear(); session['pages'].clear()
+        session['document'].deleteLater()
+
+    def _trim_sessions(self):
+        def used(): return self.cache_bytes+self.hd_bytes+sum(s['cache_bytes']+s['hd_bytes'] for s in self.sessions.values())
+        while self.sessions and (used()>self.session_limit or len(self.sessions)+bool(self.file_id)>self.session_max_documents):
+            _,old=self.sessions.popitem(last=False); self._dispose_session(old)
+            self.cache_notice='已释放较早阅读缓存，返回该文献时会重新预载'
+
+    def suspend(self,retain=True):
+        """Detach intact page widgets; callbacks from the old job are invalidated."""
+        self.stop(); self._layout_changing=True
+        scroll_position=(self.scroll.horizontalScrollBar().value(),self.scroll.verticalScrollBar().value())
+        viewport_width=self.scroll.viewport().width()
+        old=self.scroll.takeWidget()
+        if old:
+            old.hide(); old.setParent(self)
+            session={name:getattr(self,name) for name in self.SESSION_FIELDS if hasattr(self,name)}
+            session['scroll']=scroll_position; session['viewport_width']=viewport_width
+            session['full_ready']=bool(self.pages) and all(p.data for p in self.pages) and not self.load_error
+            if retain and self._active_key and self.info:
+                previous=self.sessions.pop(self._active_key,None)
+                if previous: self._dispose_session(previous)
+                self.sessions[self._active_key]=session
+            else: self._dispose_session(session)
+        self.pages=[]; self.info=None; self.file_id=None; self.active_canvas=None; self.selection_span=None
+        self.cache=OrderedDict(); self.cache_bytes=0; self.hd_cache=OrderedDict(); self.hd_bytes=0
+        self.full_ready=False; self.paused=False; self.load_error=None; self._active_key=None
+        self.current=0; self.marks=[]; self.hits={}; self.query=''; self.evidence=None
+        self.document=QWidget(); self.document.setObjectName('pdfDocument'); self.document.setFixedSize(1,1)
+        self.page_layout=QVBoxLayout(self.document); self.page_layout.setContentsMargins(8,8,8,8); self.page_layout.setSpacing(12)
+        self.scroll.setWidget(self.document); self._layout_changing=False
+        self._trim_sessions(); self.loadingChanged.emit(0,0,'empty')
+
+    def retain_current(self):
+        self.suspend()
+
+    def _restore_session(self,key,session,zoom,fit,marks,evidence):
+        self._layout_changing=True
+        blank=self.scroll.takeWidget()
+        if blank: blank.deleteLater()
+        for name in self.SESSION_FIELDS: setattr(self,name,session[name])
+        self._active_key=key; self.stopped=False; self.session_hits+=1
+        self.scroll.setWidget(self.document); self.document.show(); self.page_layout.activate()
+        self._layout_changing=False
+        if self.zoom!=zoom or self.fit!=fit or (fit and session['viewport_width']!=self.scroll.viewport().width()):
+            self.set_zoom(zoom,fit,False)
+        self._layout_changing=True
+        self.scroll.horizontalScrollBar().setValue(session['scroll'][0]); self.scroll.verticalScrollBar().setValue(session['scroll'][1])
+        self._layout_changing=False
+        self.set_marks(marks); self.set_notes_enabled(self.notes_enabled)
+        self.currentChanged.emit(self.current)
+        if evidence:
+            self.evidence=evidence; self.find(evidence['quote'],evidence=True)
+        if not self.full_ready and not self.paused and not self.load_error:
+            missing=[i for i,p in enumerate(self.pages) if not p.data]
+            self.preload_request=(self.info,missing); self.start_job()
+        else:
+            state='ready' if self.full_ready else 'paused' if self.paused else 'failed'
+            self.loadingChanged.emit(len(self.cache),len(self.pages),state)
+        self._trim_sessions(); self.report_status()
+        return True
 
     def open(self,path,file_id,expected_hash,page_index,zoom,fit,marks,evidence=None):
-        self.clear(); self.path=path; self.expected_hash=expected_hash; self.file_id=file_id; self.zoom=zoom; self.fit=fit
+        self.retain_current()
+        key=(str(path.resolve()),file_id,expected_hash)
+        session=self.sessions.pop(key,None)
+        try: stamp=self.file_stamp(path)
+        except OSError:
+            if session: self._dispose_session(session)
+            raise
+        if session:
+            if session['source_stamp']==stamp:
+                return self._restore_session(key,session,zoom,fit,marks,evidence)
+            self._dispose_session(session)
+        # Changed hashes/paths must not leave an obsolete copy under the same ID.
+        for previous in list(self.sessions):
+            if previous[1]==file_id: self._dispose_session(self.sessions.pop(previous))
+        self.path=path; self.expected_hash=expected_hash; self.file_id=file_id; self.zoom=zoom; self.fit=fit
+        self._active_key=key; self.source_stamp=stamp
+        self._trim_sessions()
         self.stopped=False; self.paused=False; self.load_error=None; self.render_count=0
         self.hd_render_count=0
         self.current=page_index; self.marks=marks; self.evidence=evidence; self.hits={}; self.query=''; self.failed_pages=set()
         self.quality=max(100,min(400,math.ceil(zoom/100)*100))
         self.preload_request=(None,None); self.start_job()
+        return False
 
     def start_job(self):
         if self.worker or self.stopped: return
@@ -184,6 +274,7 @@ class ContinuousPdfView(QWidget):
                 key=(fid,index,self.quality); size=data['image'].sizeInBytes()
                 if key in self.cache: self.cache_bytes-=self.cache.pop(key)[1]
                 self.cache[key]=(data,size); self.cache_bytes+=size; self.render_count+=1; self.failed_pages.discard(index)
+                self._trim_sessions()
                 self.show_page(index,data); self.loadingChanged.emit(len(self.cache),len(self.pages),'loading'); self.report_status()
             def page_failed(index,message):
                 if serial!=self.serial: return
@@ -220,6 +311,7 @@ class ContinuousPdfView(QWidget):
                     key,(data,size)=self.hd_cache.popitem(last=False); self.hd_bytes-=size
                     for page in self.pages:
                         if page.hd is data: page.hd=None; page.update()
+                self._trim_sessions()
                 self.report_status()
             worker.ready.connect(detail_ready)
         else: return
@@ -393,4 +485,6 @@ class ContinuousPdfView(QWidget):
         if self.info and self.info.get('reduced'): text+=' · 已按全文内存预算优化分辨率'
         if self.load_error: text+=' · '+self.load_error
         if page.hd: text+=' · 矢量高清区域'
+        if self.session_hits: text+=' · 已启用原文切换缓存'
+        if self.cache_notice: text+=' · '+self.cache_notice
         self.status.emit(text)
